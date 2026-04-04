@@ -20,6 +20,9 @@ EPISODE_PATTERNS = [
     re.compile(r'[Ee](?:p\.?\s*)?(\d{1,3})(?!\d)'),
     # " - 01", " - 001" (anime style)
     re.compile(r'\s-\s(\d{2,3})(?:\s|\.|\[|$)'),
+    # Trailing part number: name-1, name_1, name.1 (before year/quality tags or end)
+    # Matches: "Myunhgauzen-1.1979", "ylnian_1", "Movie_2", "Film-3"
+    re.compile(r'[-_](\d{1,2})(?:\.|$)'),
 ]
 
 # Video file extensions
@@ -59,6 +62,7 @@ def normalize_title(filename: str) -> str:
         r'[Ss]eason\s*\d',
         r'\s-\s\d{2,3}(?:\s|\.|\[|$)',
         r'[Ee](?:p\.?\s*)?\d{1,3}(?!\d)',
+        r'[-_]\d{1,2}(?:\.|$)',  # trailing part number: name-1, name_1
     ]
     for pattern in cut_patterns:
         m = re.search(pattern, name)
@@ -70,12 +74,14 @@ def normalize_title(filename: str) -> str:
     name = re.sub(r'[._\-\[\](){}]', ' ', name)
     name = re.sub(r'\s+', ' ', name).strip().lower()
 
-    # Remove typical quality tags from start/end
+    # Remove typical quality/release tags
     noise = [
-        r'\b\d{3,4}p\b', r'\bbluray\b', r'\bbdrip\b', r'\bwebrip\b',
+        r'\b(19|20)\d{2}\b',  # year (1900-2099)
+        r'\b\d{3,4}[pi]\b',   # 1080p, 1080i, 720p, etc.
+        r'\bbluray\b', r'\bbdrip\b', r'\bwebrip\b',
         r'\bweb-?dl\b', r'\bhdtv\b', r'\bx26[45]\b', r'\bh\.?26[45]\b',
         r'\baac\b', r'\bflac\b', r'\bdts\b', r'\b10bit\b',
-        r'\bhdr\b', r'\bremux\b',
+        r'\bhdr\b', r'\bremux\b', r'\bdvdrip\b',
     ]
     for n in noise:
         name = re.sub(n, '', name, flags=re.IGNORECASE)
@@ -101,6 +107,10 @@ def group_episodes(files: list[VideoFile]) -> dict[str, dict[tuple[int | None, i
 
     Returns: {title: {(season, episode): [VideoFile, ...], ...}, ...}
     Files without season/episode are grouped under key (None, None).
+
+    When files come from different directories and have the same episode
+    number but different titles (e.g. transliteration vs original), they
+    are merged into a single group using the first encountered title.
     """
     groups: dict[str, dict[tuple[int | None, int | None], list[VideoFile]]] = defaultdict(
         lambda: defaultdict(list)
@@ -122,4 +132,69 @@ def group_episodes(files: list[VideoFile]) -> dict[str, dict[tuple[int | None, i
 
         groups[title][(season, episode)].append(vf)
 
-    return dict(groups)
+    # Merge groups that have different titles but same episode keys
+    # (common when comparing releases with transliterated vs original names)
+    return _merge_by_episode(dict(groups))
+
+
+def _merge_by_episode(
+    groups: dict[str, dict[tuple[int | None, int | None], list[VideoFile]]],
+) -> dict[str, dict[tuple[int | None, int | None], list[VideoFile]]]:
+    """Merge groups with different titles but identical episode sets.
+
+    If two groups have the exact same set of (season, episode) keys and
+    all episodes are singletons (one file per episode per group), they
+    likely represent different releases of the same content.
+    """
+    titles = list(groups.keys())
+    if len(titles) < 2:
+        return groups
+
+    merged: dict[str, dict[tuple[int | None, int | None], list[VideoFile]]] = {}
+    used: set[str] = set()
+
+    for i, t1 in enumerate(titles):
+        if t1 in used:
+            continue
+
+        ep_keys_1 = set(groups[t1].keys())
+        # Skip groups without episode numbers (standalone movies)
+        if ep_keys_1 == {(None, None)}:
+            merged[t1] = groups[t1]
+            used.add(t1)
+            continue
+
+        # Look for a matching group with same episode keys
+        best_match = None
+        for j in range(i + 1, len(titles)):
+            t2 = titles[j]
+            if t2 in used:
+                continue
+            ep_keys_2 = set(groups[t2].keys())
+            if ep_keys_2 == {(None, None)}:
+                continue
+            # Same episode key set — likely same content
+            if ep_keys_1 == ep_keys_2:
+                best_match = t2
+                break
+            # Overlapping episode keys — also merge
+            overlap = ep_keys_1 & ep_keys_2
+            if overlap and len(overlap) >= min(len(ep_keys_1), len(ep_keys_2)) * 0.5:
+                best_match = t2
+                break
+
+        if best_match:
+            # Merge into t1
+            combined = defaultdict(list)
+            for ep_key, vf_list in groups[t1].items():
+                combined[ep_key].extend(vf_list)
+            for ep_key, vf_list in groups[best_match].items():
+                combined[ep_key].extend(vf_list)
+            merged[t1] = dict(combined)
+            used.add(t1)
+            used.add(best_match)
+        else:
+            merged[t1] = groups[t1]
+            used.add(t1)
+
+    return merged
