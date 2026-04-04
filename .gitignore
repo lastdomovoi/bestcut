@@ -3,4 +3,3 @@ __pycache__/
 .claude/worktrees/
 .cache/
 config.toml
-TODO.md
