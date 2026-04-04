@@ -157,7 +157,7 @@ class AudioTrack:
         label = self._ch_label(ch)
         if real is not None and real < ch:
             real_label = self._ch_label(real)
-            return f"{label} (fake, real: {real_label})"
+            return f"{label} [FAKE → actually {real_label}]"
         return label
 
     @staticmethod
