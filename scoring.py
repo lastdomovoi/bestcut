@@ -138,8 +138,11 @@ def score_audio(vf: VideoFile) -> float:
         codec_score += 1.0  # lossless bonus
     codec_score = min(6.0, codec_score)
 
-    # Channels (0-4): 7.1=4, 5.1=3, stereo=1
-    channel_score = min(4.0, (best.channels / 8) * 4.0)
+    # Channels (-3 to 4): 7.1=4, 5.1=3, stereo=1, mono=-3 (penalty)
+    if best.channels <= 1:
+        channel_score = -3.0  # mono is a significant downgrade
+    else:
+        channel_score = min(4.0, (best.channels / 8) * 4.0)
 
     # Bitrate (0-4)
     if best.bitrate > 0:
