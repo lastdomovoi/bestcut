@@ -250,6 +250,7 @@ _COLOR_RULES: dict[str, tuple[bool, float]] = {
     "Compatibility": (True, 0.1),
     "Integrity": (True, 0.1),
     "Language tracks": (True, 0.1),
+    "Size efficiency": (True, 0.1),
     "TOTAL": (True, 0.01),
 }
 

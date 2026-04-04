@@ -18,7 +18,7 @@ class ScoringWeights:
     audio: float = 1.0            # Audio (codec, channels, Atmos)
     subtitles: float = 1.0        # Subtitles
     compatibility: float = 1.0    # Device compatibility
-    file_size: float = 0.0        # Size penalty (0 = ignore, >0 = smaller is better)
+    file_size: float = 1.0        # Size efficiency (penalizes bloated encodes)
 
     def as_dict(self) -> dict[str, float]:
         return {

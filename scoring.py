@@ -76,16 +76,23 @@ def score_resolution(vf: VideoFile) -> float:
 def score_video_quality(vf: VideoFile) -> float:
     """Video quality score based on effective bitrate (0-25 points).
 
-    Uses bits-per-pixel (BPP) normalized by codec.
-    Good BPP for H.264: 0.05-0.15, excellent: >0.15.
+    Uses bits-per-pixel (BPP) normalized by codec with logarithmic
+    diminishing returns.  Perceptual quality gains above BPP ~0.08
+    are marginal; above ~0.12 they are negligible.
+
+    Approximate scores (H.264):
+      BPP 0.03 → ~10,  0.05 → ~15,  0.08 → ~20,
+      0.10 → ~22,  0.12 → ~23,  0.15 → ~24,  0.30 → ~25
     """
+    import math
     bpp = bits_per_pixel(vf)
     if bpp <= 0:
         return 0.0
-    # Non-linear scale: fast growth up to 0.10, then slows down
-    # 0.05 = ~12.5, 0.10 = ~20, 0.15 = ~25
-    normalized = min(1.0, bpp / 0.15)
-    return normalized * 25.0
+    # Logarithmic curve: fast growth to ~20 at BPP 0.08, then saturates
+    # Formula: 25 * (1 - e^(-bpp/k)), k chosen so BPP=0.08 ≈ 20 pts
+    k = 0.05
+    score = 25.0 * (1.0 - math.exp(-bpp / k))
+    return min(25.0, score)
 
 
 def score_hdr(vf: VideoFile) -> float:
@@ -268,9 +275,26 @@ def calculate_score(vf: VideoFile, weights: ScoringWeights | None = None,
         "integrity": score_integrity(vf),  # penalties are not scaled
     }
 
-    # File size penalty (if enabled)
-    if weights.file_size > 0 and vf.file_size_gb > 0:
-        # Normalize: 1 GB = 0 penalty, 50 GB = -15 penalty
+    # Size efficiency penalty: penalize bloated files where extra size
+    # doesn't translate to meaningful quality improvement.
+    # Uses BPP efficiency: files with very high BPP (>0.12) get penalized
+    # proportionally to their excess size vs a "reference" good encode.
+    if vf.file_size_gb > 0 and vf.video.bitrate > 0:
+        import math
+        bpp = bits_per_pixel(vf)
+        if bpp > 0:
+            # Reference BPP for "good enough" quality (codec-adjusted)
+            ref_bpp = 0.10
+            if bpp > ref_bpp:
+                # How much bigger is this file vs a ref_bpp encode?
+                bloat_ratio = bpp / ref_bpp  # e.g. 3.75x for BPP 0.375
+                # Logarithmic penalty: mild for 1.5x, moderate for 2x, harsh for 4x
+                # Max penalty ~5 points at extreme bloat
+                bloat_penalty = min(5.0, math.log2(bloat_ratio) * 2.0)
+                components["size_efficiency"] = -bloat_penalty * weights.file_size
+
+    # Legacy flat file size penalty (if file_size weight > 0 and no bloat detected)
+    if "size_efficiency" not in components and weights.file_size > 0 and vf.file_size_gb > 0:
         size_penalty = min(15.0, (vf.file_size_gb / 50.0) * 15.0) * weights.file_size
         components["file_size_penalty"] = -size_penalty
 
@@ -309,7 +333,17 @@ def score_breakdown(vf: VideoFile, weights: ScoringWeights | None = None,
         "Integrity": score_integrity(vf),
     }
 
-    if weights.file_size > 0 and vf.file_size_gb > 0:
+    # Size efficiency (bloat penalty)
+    if vf.file_size_gb > 0 and vf.video.bitrate > 0:
+        import math
+        bpp = bits_per_pixel(vf)
+        if bpp > 0:
+            ref_bpp = 0.10
+            if bpp > ref_bpp:
+                bloat_ratio = bpp / ref_bpp
+                bloat_penalty = min(5.0, math.log2(bloat_ratio) * 2.0)
+                result["Size efficiency"] = -bloat_penalty * weights.file_size
+    if "Size efficiency" not in result and weights.file_size > 0 and vf.file_size_gb > 0:
         size_penalty = min(15.0, (vf.file_size_gb / 50.0) * 15.0) * weights.file_size
         result[f"File size penalty (x{weights.file_size})"] = -size_penalty
 
