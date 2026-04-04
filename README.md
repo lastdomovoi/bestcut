@@ -1,4 +1,4 @@
-# video-compare
+# bestcut
 
 CLI tool for comparing video files by quality, size and device compatibility. Helps choose the best version when you have multiple releases of the same movie or TV series.
 
@@ -32,8 +32,8 @@ CLI tool for comparing video files by quality, size and device compatibility. He
 ## Installation
 
 ```bash
-git clone https://github.com/lastdomovoi/video-compare.git
-cd video-compare
+git clone https://github.com/lastdomovoi/bestcut.git
+cd bestcut
 ```
 
 No dependencies beyond Python stdlib and ffmpeg.
@@ -227,7 +227,7 @@ CLI arguments always override config file settings.
 ## Safety
 
 - **Never deletes video files** — `--recommend-delete` only prints suggestions
-- **`--clear-cache`** only removes JSON cache files from `~/.cache/video-compare/`
+- **`--clear-cache`** only removes JSON cache files from `~/.cache/bestcut/`
 - No network access, no external services — everything runs locally via ffprobe/ffmpeg
 
 ## License

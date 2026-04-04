@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""video-compare — compare video files by quality, size and compatibility.
+"""bestcut — compare video files by quality, size and compatibility.
 
 Usage:
-  video-compare file1.mkv file2.mkv           # compare two files
-  video-compare dir_a/ dir_b/                  # compare two series releases
-  video-compare --check movie.mkv              # integrity check
-  video-compare --info movie.mkv               # detailed info
-  video-compare --json dir/                    # JSON output
+  bestcut file1.mkv file2.mkv           # compare two files
+  bestcut dir_a/ dir_b/                  # compare two series releases
+  bestcut --check movie.mkv              # integrity check
+  bestcut --info movie.mkv               # detailed info
+  bestcut --json dir/                    # JSON output
 """
 
 from __future__ import annotations
@@ -307,7 +307,7 @@ def _print_delete_recommendations(
         print(f"  ... and {len(to_keep) - 5} more")
 
     print(f"\n  To delete, run:")
-    print(f"  video-compare ... --recommend-delete --json | jq -r '.[] | .path' | tr '\\n' '\\0' | xargs -0 rm")
+    print(f"  bestcut ... --recommend-delete --json | jq -r '.[] | .path' | tr '\\n' '\\0' | xargs -0 rm")
     print(f"\n  ⚠ WARNING: review the list before deleting!")
 
 
@@ -389,7 +389,7 @@ def cmd_compat(args: argparse.Namespace) -> int:
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="video-compare",
+        prog="bestcut",
         description="Compare video files by quality, size and compatibility",
     )
     parser.add_argument(

@@ -1,6 +1,6 @@
 """Caching probe results for faster repeated runs.
 
-Cache is stored in $XDG_CACHE_HOME/video-compare/ (default ~/.cache/video-compare/).
+Cache is stored in $XDG_CACHE_HOME/bestcut/ (default ~/.cache/bestcut/).
 Cache key: sha256(path + file size + mtime).
 Cache is automatically invalidated when the file changes.
 """
@@ -15,7 +15,7 @@ from pathlib import Path
 
 from models import AudioTrack, IntegrityResult, SubtitleTrack, VideoFile, VideoTrack
 
-CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "video-compare"
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "bestcut"
 
 
 def _cache_key(path: Path) -> str:

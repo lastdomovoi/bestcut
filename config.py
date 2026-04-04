@@ -1,6 +1,6 @@
-"""video-compare configuration via TOML file.
+"""bestcut configuration via TOML file.
 
-Path: ~/.config/video-compare/config.toml
+Path: ~/.config/bestcut/config.toml
 Example contents:
 
 [general]
@@ -166,8 +166,8 @@ class Config:
     def create_default_config(self) -> Path:
         """Create config file with default settings."""
         CONFIG_PATH.write_text('''\
-# video-compare — configuration
-# Path: ~/.config/video-compare/config.toml
+# bestcut — configuration
+# Path: ~/.config/bestcut/config.toml
 
 [general]
 # Default profile: default, quality, atmos, compact, androidtv, universal, videophile
