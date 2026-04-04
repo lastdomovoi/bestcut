@@ -439,7 +439,8 @@ def format_group_comparison(
             rows.append([label, *[f"{d.get(key, 0.0):.1f}" for d in bd]])
 
         rows.append(["", *["" for _ in ranked]])
-        rows.append(["TOTAL", *[f"{vf.score:.1f}" for vf in ranked]])
+        # Use vf.score (clamped to 0) — matches calculate_score behavior
+        rows.append(["TOTAL", *[f"{max(0.0, vf.score):.1f}" for vf in ranked]])
 
         # Apply color highlighting
         for i, row in enumerate(rows):
@@ -574,8 +575,9 @@ def _summarize_differences(ranked: list[VideoFile]) -> list[str]:
 
         # Aspect ratio / black bars
         if best.video.has_black_bars != other.video.has_black_bars:
+            other_num = ranked.index(other) + 1
             if other.video.has_black_bars:
-                diffs.append(f"{_RED}-{_RESET} #{len(ranked)} has black bars")
+                diffs.append(f"{_RED}-{_RESET} #{other_num} has black bars")
             else:
                 diffs.append(f"{_RED}-{_RESET} #1 has black bars")
 

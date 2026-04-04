@@ -49,6 +49,7 @@ def check_quick(path: Path) -> IntegrityResult:
         if tail_check.returncode != 0:
             result.is_truncated = True
             result.errors.append("[end] file truncated — failed to decode last 30 seconds")
+            result.error_count += 1
 
     return result
 

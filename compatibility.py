@@ -184,11 +184,11 @@ def _container_matches(file_container: str, supported: set[str]) -> bool:
     """Check if the file container is supported."""
     if "*" in supported:
         return True
-    return any(
-        fc in s or s in fc
-        for fc in file_container.split(",")
-        for s in supported
-    )
+    file_tokens = set(file_container.split(","))
+    supported_tokens = set()
+    for s in supported:
+        supported_tokens.update(s.split(","))
+    return bool(file_tokens & supported_tokens)
 
 
 def check_compatibility(vf: VideoFile, devices: list[str] | None = None) -> dict[str, list[str]]:
