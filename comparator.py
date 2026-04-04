@@ -152,6 +152,64 @@ def format_comparison(comp: dict, verbose: bool = False) -> str:
     return "\n".join(lines)
 
 
+def _render_table(headers: list[str], rows: list[list[str]], highlight_row: int = 0) -> str:
+    """Render a simple ASCII table. First row (highlight_row) gets a ★ marker."""
+    # Calculate column widths
+    col_widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            col_widths[i] = max(col_widths[i], len(cell))
+
+    # Header
+    sep = "+-" + "-+-".join("-" * w for w in col_widths) + "-+"
+    hdr = "| " + " | ".join(h.ljust(w) for h, w in zip(headers, col_widths)) + " |"
+    lines = [sep, hdr, sep]
+
+    # Rows
+    for i, row in enumerate(rows):
+        cells = []
+        for j, (cell, w) in enumerate(zip(row, col_widths)):
+            # Right-align numeric columns (all except first)
+            if j == 0:
+                cells.append(cell.ljust(w))
+            else:
+                cells.append(cell.rjust(w))
+        lines.append("| " + " | ".join(cells) + " |")
+
+    lines.append(sep)
+    return "\n".join(lines)
+
+
+def _audio_summary(vf: VideoFile) -> str:
+    """Short audio summary for table cell."""
+    if not vf.audio_tracks:
+        return "-"
+    best = vf.audio_tracks[0]
+    # Find best by channels
+    for at in vf.audio_tracks:
+        if at.channels > best.channels:
+            best = at
+    parts = [best.format_label, best.channel_label]
+    if best.spatial_format:
+        parts.append(best.spatial_format)
+    elif best.is_lossless:
+        parts.append("lossless")
+    return " ".join(parts)
+
+
+def _subs_summary(vf: VideoFile) -> str:
+    """Short subtitles summary for table cell."""
+    if not vf.subtitle_tracks:
+        return "-"
+    langs = []
+    for st in vf.subtitle_tracks:
+        s = st.language or "?"
+        if st.forced:
+            s += "(F)"
+        langs.append(s)
+    return ", ".join(langs)
+
+
 def format_group_comparison(
     title: str,
     episode_key: tuple[int | None, int | None],
@@ -182,17 +240,56 @@ def format_group_comparison(
     # Sort by score
     ranked = sorted(files, key=lambda f: f.score, reverse=True)
 
-    for i, vf in enumerate(ranked):
-        marker = " ★ BEST" if i == 0 else ""
-        lines.append(f"\n  #{i + 1}{marker}")
-        lines.append(format_file_info(vf, verbose, weights))
+    # Build comparison table
+    v_br = lambda vf: f"{vf.video.bitrate / 1_000_000:.1f}" if vf.video.bitrate else "?"
 
-    # Summary
+    if verbose:
+        bd = [score_breakdown(vf, weights) for vf in ranked]
+        bd_keys = list(bd[0].keys())
+
+        headers = ["", "#1 ★ BEST", *[f"#{i+2}" for i in range(len(ranked)-1)]]
+        rows = [
+            ["File", *[vf.path.name for vf in ranked]],
+            ["Size", *[vf.file_size_human for vf in ranked]],
+            ["Duration", *[vf.duration_human for vf in ranked]],
+            ["Video", *[f"{vf.video.codec.upper()} {vf.video.resolution_label}" for vf in ranked]],
+            ["Bitrate", *[f"{v_br(vf)} Mbps" for vf in ranked]],
+            ["FPS", *[f"{vf.video.fps:.0f}" for vf in ranked]],
+            ["HDR", *[vf.video.hdr_type.upper() if vf.video.hdr_type else "-" for vf in ranked]],
+            ["Audio", *[_audio_summary(vf) for vf in ranked]],
+            ["Subtitles", *[_subs_summary(vf) for vf in ranked]],
+            ["Compat issues", *[str(len(vf.compatibility_issues)) for vf in ranked]],
+            ["", *["" for _ in ranked]],
+        ]
+        # Score breakdown
+        for key in bd_keys:
+            label = key.split("(")[0].strip()
+            rows.append([label, *[f"{d[key]:.1f}" for d in bd]])
+
+        rows.append(["", *["" for _ in ranked]])
+        rows.append(["TOTAL", *[f"{vf.score:.1f}" for vf in ranked]])
+    else:
+        headers = ["", "#1 ★ BEST", *[f"#{i+2}" for i in range(len(ranked)-1)]]
+        rows = [
+            ["File", *[vf.path.name for vf in ranked]],
+            ["Size", *[vf.file_size_human for vf in ranked]],
+            ["Video", *[f"{vf.video.codec.upper()} {vf.video.resolution_label} {v_br(vf)} Mbps" for vf in ranked]],
+            ["FPS", *[f"{vf.video.fps:.0f}" for vf in ranked]],
+            ["Audio", *[_audio_summary(vf) for vf in ranked]],
+            ["Subtitles", *[_subs_summary(vf) for vf in ranked]],
+            ["Compat issues", *[str(len(vf.compatibility_issues)) for vf in ranked]],
+            ["TOTAL", *[f"{vf.score:.1f} pts" for vf in ranked]],
+        ]
+
+    lines.append(_render_table(headers, rows))
+
+    # Recommendation
     best = ranked[0]
-    lines.append(f"\n  Recommendation: {best.path.name}")
-    if len(ranked) > 1:
-        diff = best.score - ranked[1].score
-        lines.append(f"  Advantage: +{diff:.1f} points over next")
+    diff = best.score - ranked[1].score
+    if diff < 2.0:
+        lines.append(f"  Result: roughly equal (difference {diff:.1f})")
+    else:
+        lines.append(f"  Recommendation: {best.path.name} (+{diff:.1f} pts)")
 
     return "\n".join(lines)
 
