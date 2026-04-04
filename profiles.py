@@ -1,7 +1,7 @@
-"""Профили приоритетов для скоринга.
+"""Priority profiles for scoring.
 
-Позволяют настроить веса компонентов при сравнении видеофайлов.
-Профиль можно выбрать через --profile или задать свои веса через --weights.
+Allow configuring component weights when comparing video files.
+A profile can be selected via --profile or custom weights set via --weights.
 """
 
 from __future__ import annotations
@@ -11,14 +11,14 @@ from dataclasses import dataclass, field
 
 @dataclass
 class ScoringWeights:
-    """Веса компонентов скоринга. Все значения — множители (1.0 = норма)."""
-    resolution: float = 1.0       # Разрешение
-    video_quality: float = 1.0    # Качество видео (битрейт/кодек)
+    """Scoring component weights. All values are multipliers (1.0 = default)."""
+    resolution: float = 1.0       # Resolution
+    video_quality: float = 1.0    # Video quality (bitrate/codec)
     hdr: float = 1.0              # HDR
-    audio: float = 1.0            # Аудио (кодек, каналы, Atmos)
-    subtitles: float = 1.0        # Субтитры
-    compatibility: float = 1.0    # Совместимость с устройствами
-    file_size: float = 0.0        # Штраф за размер (0 = не учитывать, >0 = меньше лучше)
+    audio: float = 1.0            # Audio (codec, channels, Atmos)
+    subtitles: float = 1.0        # Subtitles
+    compatibility: float = 1.0    # Device compatibility
+    file_size: float = 0.0        # Size penalty (0 = ignore, >0 = smaller is better)
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -32,14 +32,14 @@ class ScoringWeights:
         }
 
 
-# Предустановленные профили
+# Preset profiles
 PROFILES: dict[str, tuple[str, ScoringWeights]] = {
     "default": (
-        "Сбалансированный (по умолчанию)",
+        "Balanced (default)",
         ScoringWeights(),
     ),
     "quality": (
-        "Максимальное качество — разрешение, битрейт и HDR в приоритете",
+        "Maximum quality — resolution, bitrate and HDR prioritized",
         ScoringWeights(
             resolution=1.5,
             video_quality=1.5,
@@ -50,7 +50,7 @@ PROFILES: dict[str, tuple[str, ScoringWeights]] = {
         ),
     ),
     "atmos": (
-        "Приоритет аудио — Dolby Atmos, DTS:X, lossless, многоканальность",
+        "Audio priority — Dolby Atmos, DTS:X, lossless, multichannel",
         ScoringWeights(
             resolution=0.8,
             video_quality=0.8,
@@ -62,7 +62,7 @@ PROFILES: dict[str, tuple[str, ScoringWeights]] = {
         ),
     ),
     "compact": (
-        "Минимальный размер при приемлемом качестве",
+        "Minimum size with acceptable quality",
         ScoringWeights(
             resolution=0.7,
             video_quality=0.7,
@@ -74,7 +74,7 @@ PROFILES: dict[str, tuple[str, ScoringWeights]] = {
         ),
     ),
     "androidtv": (
-        "Android TV / Homatics / Kodi — совместимость в приоритете",
+        "Android TV / Homatics / Kodi — compatibility prioritized",
         ScoringWeights(
             resolution=1.0,
             video_quality=1.0,
@@ -86,7 +86,7 @@ PROFILES: dict[str, tuple[str, ScoringWeights]] = {
         ),
     ),
     "universal": (
-        "Универсальный — максимальная совместимость со всеми устройствами",
+        "Universal — maximum compatibility with all devices",
         ScoringWeights(
             resolution=0.8,
             video_quality=0.8,
@@ -98,7 +98,7 @@ PROFILES: dict[str, tuple[str, ScoringWeights]] = {
         ),
     ),
     "videophile": (
-        "Видеофил — максимум всего: 4K HDR Atmos lossless, размер не важен",
+        "Videophile — everything maxed: 4K HDR Atmos lossless, size irrelevant",
         ScoringWeights(
             resolution=1.5,
             video_quality=1.5,
@@ -113,47 +113,47 @@ PROFILES: dict[str, tuple[str, ScoringWeights]] = {
 
 
 def get_profile(name: str) -> ScoringWeights:
-    """Получить профиль по имени."""
+    """Get profile by name."""
     if name not in PROFILES:
         available = ", ".join(PROFILES.keys())
-        raise ValueError(f"Неизвестный профиль '{name}'. Доступные: {available}")
+        raise ValueError(f"Unknown profile '{name}'. Available: {available}")
     return PROFILES[name][1]
 
 
 def parse_custom_weights(weights_str: str) -> ScoringWeights:
-    """Разобрать строку кастомных весов вида 'resolution=1.5,audio=2.0,...'."""
+    """Parse custom weights string like 'resolution=1.5,audio=2.0,...'."""
     w = ScoringWeights()
     for pair in weights_str.split(","):
         pair = pair.strip()
         if not pair:
             continue
         if "=" not in pair:
-            raise ValueError(f"Неверный формат веса: '{pair}'. Ожидается: ключ=значение")
+            raise ValueError(f"Invalid weight format: '{pair}'. Expected: key=value")
         key, val = pair.split("=", 1)
         key = key.strip()
         val = val.strip()
         if not hasattr(w, key):
             valid = ", ".join(w.as_dict().keys())
-            raise ValueError(f"Неизвестный вес '{key}'. Доступные: {valid}")
+            raise ValueError(f"Unknown weight '{key}'. Available: {valid}")
         try:
             setattr(w, key, float(val))
         except ValueError:
-            raise ValueError(f"Неверное значение для '{key}': '{val}'")
+            raise ValueError(f"Invalid value for '{key}': '{val}'")
     return w
 
 
 def list_profiles() -> str:
-    """Список доступных профилей для справки."""
-    lines = ["Доступные профили приоритетов:", ""]
+    """List available profiles for reference."""
+    lines = ["Available priority profiles:", ""]
     for name, (desc, weights) in PROFILES.items():
         lines.append(f"  {name:15s} — {desc}")
         w = weights.as_dict()
         non_default = {k: v for k, v in w.items() if v != 1.0}
         if non_default:
             parts = [f"{k}={v}" for k, v in non_default.items()]
-            lines.append(f"  {'':15s}   веса: {', '.join(parts)}")
+            lines.append(f"  {'':15s}   weights: {', '.join(parts)}")
     lines.append("")
-    lines.append("Кастомные веса: --weights 'resolution=1.5,audio=2.0,file_size=1.0'")
-    lines.append("Доступные ключи: resolution, video_quality, hdr, audio, subtitles, "
+    lines.append("Custom weights: --weights 'resolution=1.5,audio=2.0,file_size=1.0'")
+    lines.append("Available keys: resolution, video_quality, hdr, audio, subtitles, "
                   "compatibility, file_size")
     return "\n".join(lines)

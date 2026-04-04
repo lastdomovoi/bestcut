@@ -1,4 +1,4 @@
-"""Парсинг имён файлов и группировка эпизодов сериалов."""
+"""Filename parsing and TV series episode grouping."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 
 from models import VideoFile
 
-# Паттерны для извлечения сезона/эпизода (в порядке приоритета)
+# Patterns for extracting season/episode (in priority order)
 EPISODE_PATTERNS = [
     # S01E01, S1E1, s01e01
     re.compile(r'[Ss](\d{1,3})[Ee](\d{1,3})'),
@@ -16,13 +16,13 @@ EPISODE_PATTERNS = [
     re.compile(r'(\d{1,2})[xX](\d{1,3})'),
     # Season 1 Episode 01
     re.compile(r'[Ss]eason\s*(\d{1,3})\s*[Ee]pisode\s*(\d{1,3})', re.IGNORECASE),
-    # E01, Ep01, Ep.01 (без сезона)
+    # E01, Ep01, Ep.01 (no season)
     re.compile(r'[Ee](?:p\.?\s*)?(\d{1,3})(?!\d)'),
-    # " - 01", " - 001" (аниме-стиль)
+    # " - 01", " - 001" (anime style)
     re.compile(r'\s-\s(\d{2,3})(?:\s|\.|\[|$)'),
 ]
 
-# Расширения видеофайлов
+# Video file extensions
 VIDEO_EXTENSIONS = {
     ".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv",
     ".m4v", ".mpg", ".mpeg", ".ts", ".m2ts", ".webm",
@@ -30,9 +30,9 @@ VIDEO_EXTENSIONS = {
 
 
 def parse_episode(filename: str) -> tuple[int | None, int | None]:
-    """Извлечь (season, episode) из имени файла.
+    """Extract (season, episode) from filename.
 
-    Возвращает (None, None) если не найдено.
+    Returns (None, None) if not found.
     """
     name = Path(filename).stem
 
@@ -42,17 +42,17 @@ def parse_episode(filename: str) -> tuple[int | None, int | None]:
             groups = m.groups()
             if len(groups) >= 2:
                 return int(groups[0]), int(groups[1])
-            # Паттерны без сезона (E01, аниме)
+            # Patterns without season (E01, anime)
             return None, int(groups[0])
 
     return None, None
 
 
 def normalize_title(filename: str) -> str:
-    """Извлечь и нормализовать название сериала из имени файла."""
+    """Extract and normalize series title from filename."""
     name = Path(filename).stem
 
-    # Отрезать всё после маркера сезона/эпизода
+    # Cut everything after season/episode marker
     cut_patterns = [
         r'[Ss]\d{1,3}[Ee]',
         r'\d{1,2}[xX]\d{1,3}',
@@ -66,11 +66,11 @@ def normalize_title(filename: str) -> str:
             name = name[:m.start()]
             break
 
-    # Убрать разделители, лишние пробелы
+    # Remove separators and extra whitespace
     name = re.sub(r'[._\-\[\](){}]', ' ', name)
     name = re.sub(r'\s+', ' ', name).strip().lower()
 
-    # Убрать типичные теги качества в начале/конце
+    # Remove typical quality tags from start/end
     noise = [
         r'\b\d{3,4}p\b', r'\bbluray\b', r'\bbdrip\b', r'\bwebrip\b',
         r'\bweb-?dl\b', r'\bhdtv\b', r'\bx26[45]\b', r'\bh\.?26[45]\b',
@@ -84,7 +84,7 @@ def normalize_title(filename: str) -> str:
 
 
 def scan_directory(path: Path) -> list[Path]:
-    """Рекурсивно найти все видеофайлы в директории."""
+    """Recursively find all video files in a directory."""
     path = Path(path)
     if path.is_file():
         return [path] if path.suffix.lower() in VIDEO_EXTENSIONS else []
@@ -97,10 +97,10 @@ def scan_directory(path: Path) -> list[Path]:
 
 
 def group_episodes(files: list[VideoFile]) -> dict[str, dict[tuple[int | None, int | None], list[VideoFile]]]:
-    """Сгруппировать видеофайлы по сериалу и эпизоду.
+    """Group video files by series and episode.
 
-    Возвращает: {title: {(season, episode): [VideoFile, ...], ...}, ...}
-    Файлы без сезона/эпизода группируются под ключом (None, None).
+    Returns: {title: {(season, episode): [VideoFile, ...], ...}, ...}
+    Files without season/episode are grouped under key (None, None).
     """
     groups: dict[str, dict[tuple[int | None, int | None], list[VideoFile]]] = defaultdict(
         lambda: defaultdict(list)
@@ -116,7 +116,7 @@ def group_episodes(files: list[VideoFile]) -> dict[str, dict[tuple[int | None, i
             title = normalize_title(fname)
             vf.series_title = title
         else:
-            # Для отдельных фильмов — используем имя файла
+            # For standalone movies — use filename
             title = normalize_title(fname) or vf.path.stem.lower()
             vf.series_title = title
 

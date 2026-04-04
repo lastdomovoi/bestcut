@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""video-compare — сравнение видеофайлов по качеству, размеру и совместимости.
+"""video-compare — compare video files by quality, size and compatibility.
 
-Использование:
-  video-compare file1.mkv file2.mkv           # сравнить два файла
-  video-compare dir_a/ dir_b/                  # сравнить два релиза сериала
-  video-compare --check movie.mkv              # проверка целостности
-  video-compare --info movie.mkv               # подробная информация
-  video-compare --json dir/                    # вывод в JSON
+Usage:
+  video-compare file1.mkv file2.mkv           # compare two files
+  video-compare dir_a/ dir_b/                  # compare two series releases
+  video-compare --check movie.mkv              # integrity check
+  video-compare --info movie.mkv               # detailed info
+  video-compare --json dir/                    # JSON output
 """
 
 from __future__ import annotations
@@ -37,21 +37,21 @@ def process_file(
     verbose: bool = False,
     weights: ScoringWeights | None = None,
 ) -> VideoFile:
-    """Обработать один файл: probe + integrity + compatibility + score."""
+    """Process a single file: probe + integrity + compatibility + score."""
     vf = probe_file(path)
 
-    # Целостность
+    # Integrity
     if check_integrity == "quick":
         vf.integrity = check_quick(path)
     elif check_integrity == "full":
         vf.integrity = check_full(path)
 
-    # Синхронность потоков (быстрая проверка, всегда)
+    # Stream duration sync (quick check, always)
     sync_issues = check_duration_sync(vf)
     if sync_issues:
         vf.integrity.warnings.extend(sync_issues)
 
-    # Совместимость
+    # Compatibility
     compat = check_compatibility(vf)
     vf.compatibility_score = compatibility_score(vf)
     all_issues = []
@@ -60,83 +60,115 @@ def process_file(
             all_issues.append(f"[{dev_id}] {issue}")
     vf.compatibility_issues = all_issues
 
-    # Скоринг
+    # Scoring
     calculate_score(vf, weights)
 
     return vf
 
 
-def _resolve_weights(args: argparse.Namespace) -> ScoringWeights:
-    """Получить веса из аргументов CLI."""
+def _resolve_weights(args: argparse.Namespace, cfg=None) -> ScoringWeights:
+    """Get weights: CLI args > config file > default profile."""
     if args.weights:
         return parse_custom_weights(args.weights)
+    if cfg and cfg.weights and args.profile == "default":
+        return cfg.weights
     return get_profile(args.profile)
 
 
 def cmd_compare(args: argparse.Namespace) -> int:
-    """Сравнить файлы/дире��тории."""
-    # Специальная команда: показать список профилей
+    """Compare files/directories."""
+    # Special command: show profile list
     if args.list_profiles:
         print(list_profiles())
         return 0
 
     paths = [Path(p) for p in args.paths]
-    weights = _resolve_weights(args)
+    weights = _resolve_weights(args, getattr(args, '_cfg', None))
 
-    # Собрать все видеофайлы
+    # Collect all video files
     all_files: list[Path] = []
     for p in paths:
         found = scan_directory(p)
         if not found:
-            print(f"Видеофайлы не найдены: {p}", file=sys.stderr)
+            print(f"No video files found: {p}", file=sys.stderr)
         all_files.extend(found)
 
     if not all_files:
-        print("Нет видеофайлов для сравнения.", file=sys.stderr)
+        print("No video files to compare.", file=sys.stderr)
         return 1
 
-    # Прогресс в stderr чтобы не ломать JSON
+    # Progress to stderr to avoid breaking JSON
     log = sys.stderr
     profile_name = args.profile if not args.weights else "custom"
-    log.write(f"Профиль: {profile_name} | Найдено {len(all_files)} видеофайлов, анализ...\n")
+    log.write(f"Profile: {profile_name} | Found {len(all_files)} video files, analyzing...\n")
 
     check_mode = "none"
     if args.check:
         check_mode = "full" if args.full_check else "quick"
-        log.write(f"Проверка целостности: {'полная' if check_mode == 'full' else 'быстрая'}\n")
+        log.write(f"Integrity check: {'full' if check_mode == 'full' else 'quick'}\n")
 
-    # Обработать файлы
+    # Process files
     video_files: list[VideoFile] = []
-    for i, fp in enumerate(all_files, 1):
-        log.write(f"  [{i}/{len(all_files)}] {fp.name}...")
+    total = len(all_files)
+
+    if total >= 4 and not check_mode.endswith("full"):
+        # Parallel processing for 4+ files (unless full check)
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import os
+
+        workers = min(os.cpu_count() or 4, total, 8)
+        log.write(f"  Parallel processing ({workers} threads)...\n")
         log.flush()
-        try:
-            vf = process_file(fp, check_integrity=check_mode, verbose=args.verbose, weights=weights)
-            video_files.append(vf)
-            log.write(f" {vf.score:.1f} баллов\n")
-        except Exception as e:
-            log.write(f" ОШИБКА: {e}\n")
+
+        futures = {}
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for fp in all_files:
+                fut = pool.submit(process_file, fp, check_mode, args.verbose, weights)
+                futures[fut] = fp
+
+            done = 0
+            for fut in as_completed(futures):
+                done += 1
+                fp = futures[fut]
+                try:
+                    vf = fut.result()
+                    video_files.append(vf)
+                    log.write(f"  [{done}/{total}] {fp.name}... {vf.score:.1f} points\n")
+                except Exception as e:
+                    log.write(f"  [{done}/{total}] {fp.name}... ERROR: {e}\n")
+                log.flush()
+    else:
+        # Sequential processing
+        for i, fp in enumerate(all_files, 1):
+            log.write(f"  [{i}/{total}] {fp.name}...")
+            log.flush()
+            try:
+                vf = process_file(fp, check_integrity=check_mode, verbose=args.verbose, weights=weights)
+                video_files.append(vf)
+                log.write(f" {vf.score:.1f} points\n")
+            except Exception as e:
+                log.write(f" ERROR: {e}\n")
 
     if not video_files:
-        print("Не удалось обработать ни одного файла.", file=sys.stderr)
+        print("Failed to process any files.", file=sys.stderr)
         return 1
 
-    # JSON вывод
+    # JSON output
     if args.json:
         print(export_json(video_files))
         return 0
 
-    # Группировка и сравнение
+    # Grouping and comparison
     groups = group_episodes(video_files)
 
     print(f"\n{'=' * 70}")
-    print(f" РЕЗУЛЬТАТЫ СРАВНЕНИЯ")
+    print(f" COMPARISON RESULTS")
     print(f"{'=' * 70}")
 
     for title, episodes in sorted(groups.items()):
         for ep_key, files in sorted(episodes.items(), key=lambda x: (x[0][0] or 0, x[0][1] or 0)):
             if len(files) == 1 and not args.verbose and not args.info:
-                # Для одиночных файлов без verbose — краткая строка
+                # Single files without verbose — short summary line
                 vf = files[0]
                 season, episode = ep_key
                 if season is not None:
@@ -148,15 +180,15 @@ def cmd_compare(args: argparse.Namespace) -> int:
                 label = f"{title} {ep_str}".strip()
                 print(f"\n  {label}: {vf.path.name}")
                 print(f"    {vf.video.resolution_label} {vf.video.codec.upper()} | "
-                      f"{vf.file_size_human} | {vf.score:.1f} баллов")
+                      f"{vf.file_size_human} | {vf.score:.1f} points")
                 if not vf.integrity.is_ok and vf.integrity.checked:
-                    print(f"    ⚠ Проблемы целостности: {vf.integrity.error_count} ошибок")
+                    print(f"    ⚠ Integrity issues: {vf.integrity.error_count} errors")
                 continue
 
-            # Для групп или verbose — полное сравнение
+            # Groups or verbose — full comparison
             print(format_group_comparison(title, ep_key, files, verbose=args.verbose, weights=weights))
 
-    # Общая сводка для сериалов
+    # Overall summary for series
     has_comparisons = any(
         len(files) > 1
         for episodes in groups.values()
@@ -164,7 +196,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
     )
     if has_comparisons:
         print(f"\n{'=' * 70}")
-        print(" СВОДКА")
+        print(" SUMMARY")
         print(f"{'=' * 70}")
 
         total_a_size = 0
@@ -179,11 +211,11 @@ def cmd_compare(args: argparse.Namespace) -> int:
                 best = ranked[0]
                 second = ranked[1]
 
-                # Простая статистика: считаем по путям (первый vs второй аргумент)
+                # Simple stats: count by paths (first vs second argument)
                 if best.score - second.score < 2.0:
                     ties += 1
                 else:
-                    # Определяем по родительской директории
+                    # Determine by parent directory
                     if len(paths) >= 2:
                         path_a = Path(paths[0]).resolve()
                         if str(best.path.resolve()).startswith(str(path_a)):
@@ -192,16 +224,72 @@ def cmd_compare(args: argparse.Namespace) -> int:
                             b_wins += 1
 
         if len(paths) >= 2:
-            print(f"  {paths[0].name}: {a_wins} побед")
-            print(f"  {paths[1].name}: {b_wins} побед")
+            print(f"  {paths[0].name}: {a_wins} wins")
+            print(f"  {paths[1].name}: {b_wins} wins")
             if ties:
-                print(f"  Ничьих: {ties}")
+                print(f"  Ties: {ties}")
+
+    # Deletion recommendations
+    if args.recommend_delete:
+        _print_delete_recommendations(groups)
 
     return 0
 
 
+def _print_delete_recommendations(
+    groups: dict,
+) -> None:
+    """Print deletion recommendations for worst duplicates."""
+    to_delete: list[VideoFile] = []
+    to_keep: list[VideoFile] = []
+
+    for title, episodes in groups.items():
+        for ep_key, files in episodes.items():
+            if len(files) < 2:
+                continue
+            ranked = sorted(files, key=lambda f: f.score, reverse=True)
+            to_keep.append(ranked[0])
+            # All except the best — deletion candidates
+            for vf in ranked[1:]:
+                to_delete.append(vf)
+
+    if not to_delete:
+        print("\n  No duplicates found — nothing to delete.")
+        return
+
+    total_save = sum(vf.file_size for vf in to_delete)
+    total_save_gb = total_save / (1024 ** 3)
+
+    print(f"\n{'=' * 70}")
+    print(" DELETION RECOMMENDATIONS")
+    print(f"{'=' * 70}")
+    print(f"  Found {len(to_delete)} duplicate files for deletion")
+    print(f"  Space savings: {total_save_gb:.2f} GB")
+    print()
+
+    for vf in sorted(to_delete, key=lambda f: f.file_size, reverse=True):
+        ep_str = ""
+        if vf.season is not None:
+            ep_str = f" S{vf.season:02d}E{vf.episode:02d}"
+        elif vf.episode is not None:
+            ep_str = f" E{vf.episode:02d}"
+        print(f"  DEL  {vf.path}")
+        print(f"       {vf.file_size_human} | {vf.video.resolution_label} "
+              f"{vf.video.codec.upper()} | {vf.score:.1f} points")
+
+    print(f"\n  Keep ({len(to_keep)} files):")
+    for vf in to_keep[:5]:
+        print(f"  KEEP {vf.path.name} ({vf.file_size_human}, {vf.score:.1f})")
+    if len(to_keep) > 5:
+        print(f"  ... and {len(to_keep) - 5} more")
+
+    print(f"\n  To delete, run:")
+    print(f"  video-compare ... --recommend-delete --json | jq -r '.[] | .path' | xargs rm")
+    print(f"\n  ⚠ WARNING: review the list before deleting!")
+
+
 def cmd_info(args: argparse.Namespace) -> int:
-    """Подробная информация о файле."""
+    """Detailed file information."""
     for p in args.paths:
         path = Path(p)
         files = scan_directory(path)
@@ -211,12 +299,12 @@ def cmd_info(args: argparse.Namespace) -> int:
                 print(format_file_info(vf, verbose=True))
                 print()
             except Exception as e:
-                print(f"ОШИБКА {fp}: {e}", file=sys.stderr)
+                print(f"ERROR {fp}: {e}", file=sys.stderr)
     return 0
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    """Проверка целостности."""
+    """Integrity check."""
     mode = "full" if args.full_check else "quick"
     errors_found = False
 
@@ -224,16 +312,16 @@ def cmd_check(args: argparse.Namespace) -> int:
         path = Path(p)
         files = scan_directory(path)
         for fp in files:
-            print(f"Проверка: {fp.name}...", end="", flush=True)
+            print(f"Checking: {fp.name}...", end="", flush=True)
             try:
                 vf = process_file(fp, check_integrity=mode)
                 if vf.integrity.is_ok:
-                    print(" ОК")
+                    print(" OK")
                 else:
                     errors_found = True
-                    print(f" {vf.integrity.error_count} ОШИБОК")
+                    print(f" {vf.integrity.error_count} ERRORS")
                     if vf.integrity.is_truncated:
-                        print(f"  ⚠ ФАЙЛ ОБРЕЗАН")
+                        print(f"  ⚠ FILE TRUNCATED")
                     for err in vf.integrity.errors:
                         print(f"  - {err}")
 
@@ -243,13 +331,13 @@ def cmd_check(args: argparse.Namespace) -> int:
 
             except Exception as e:
                 errors_found = True
-                print(f" ОШИБКА: {e}")
+                print(f" ERROR: {e}")
 
     return 1 if errors_found else 0
 
 
 def cmd_compat(args: argparse.Namespace) -> int:
-    """Проверка совместимости."""
+    """Compatibility check."""
     for p in args.paths:
         path = Path(p)
         files = scan_directory(path)
@@ -262,74 +350,117 @@ def cmd_compat(args: argparse.Namespace) -> int:
                     from compatibility import DEVICE_PROFILES
                     name = DEVICE_PROFILES[dev_id]["name"]
                     if issues:
-                        print(f"  {name}: {len(issues)} проблем")
+                        print(f"  {name}: {len(issues)} issues")
                         for issue in issues:
                             print(f"    - {issue}")
                     else:
-                        print(f"  {name}: ОК")
+                        print(f"  {name}: OK")
             except Exception as e:
-                print(f"ОШИБКА {fp}: {e}", file=sys.stderr)
+                print(f"ERROR {fp}: {e}", file=sys.stderr)
     return 0
 
 
 def main():
     parser = argparse.ArgumentParser(
         prog="video-compare",
-        description="Сравнение видеофайлов по качеству, размеру и совместимости",
+        description="Compare video files by quality, size and compatibility",
     )
     parser.add_argument(
         "paths", nargs="*",
-        help="Файлы или директории для сравнения",
+        help="Files or directories to compare",
     )
     parser.add_argument(
         "--check", "-c", action="store_true",
-        help="Проверить целостность файлов",
+        help="Check file integrity",
     )
     parser.add_argument(
         "--full-check", "-C", action="store_true",
-        help="Полная проверка целостности (медленная, декодирует весь файл)",
+        help="Full integrity check (slow, decodes entire file)",
     )
     parser.add_argument(
         "--info", "-i", action="store_true",
-        help="Подробная информация о файлах",
+        help="Detailed file information",
     )
     parser.add_argument(
         "--compat", action="store_true",
-        help="Проверка совместимости с плеерами/устройствами",
+        help="Check compatibility with players/devices",
     )
     parser.add_argument(
         "--json", "-j", action="store_true",
-        help="Вывод в формате JSON",
+        help="Output in JSON format",
     )
     parser.add_argument(
         "--verbose", "-v", action="store_true",
-        help="Подробный вывод с разбивкой баллов",
+        help="Verbose output with score breakdown",
     )
     parser.add_argument(
         "--profile", "-p", default="default",
-        help="Профиль приоритетов: default, quality, atmos, compact, "
-             "androidtv, universal, videophile (по умолчанию: default)",
+        help="Priority profile: default, quality, atmos, compact, "
+             "androidtv, universal, videophile (default: default)",
     )
     parser.add_argument(
         "--weights", "-w",
-        help="Кастомные веса: 'resolution=1.5,audio=2.0,file_size=1.0'",
+        help="Custom weights: 'resolution=1.5,audio=2.0,file_size=1.0'",
     )
     parser.add_argument(
         "--list-profiles", action="store_true",
-        help="Показать список доступных профилей приоритетов",
+        help="Show available priority profiles",
+    )
+    parser.add_argument(
+        "--recommend-delete", "-D", action="store_true",
+        help="Show deletion recommendations for worst duplicates",
+    )
+    parser.add_argument(
+        "--no-cache", action="store_true",
+        help="Disable cache (always run ffprobe from scratch)",
+    )
+    parser.add_argument(
+        "--clear-cache", action="store_true",
+        help="Clear analysis results cache",
+    )
+    parser.add_argument(
+        "--init-config", action="store_true",
+        help="Create config file with default settings",
     )
 
     args = parser.parse_args()
 
-    # Показать профили (не требует paths)
+    # Commands without paths
     if args.list_profiles:
         print(list_profiles())
         sys.exit(0)
 
-    if not args.paths:
-        parser.error("укажите файлы или директории для сравнения")
+    if args.clear_cache:
+        from cache import clear_cache
+        count = clear_cache()
+        print(f"Cache cleared: {count} entries removed")
+        sys.exit(0)
 
-    # Проверка full-check подразумевает check
+    if args.init_config:
+        from config import Config
+        path = Config().create_default_config()
+        print(f"Config created: {path}")
+        sys.exit(0)
+
+    if not args.paths:
+        parser.error("specify files or directories to compare")
+
+    # Load config
+    from config import Config
+    cfg = Config.load()
+
+    # Apply config values as defaults (CLI arguments take priority)
+    if cfg.profile != "default" and args.profile == "default":
+        args.profile = cfg.profile
+    args._cfg = cfg  # pass to subcommands
+    if cfg.verbose and not args.verbose:
+        args.verbose = True
+    if cfg.check_integrity != "none" and not args.check:
+        args.check = True
+        if cfg.check_integrity == "full":
+            args.full_check = True
+
+    # full-check implies check
     if args.full_check:
         args.check = True
 

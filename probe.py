@@ -1,4 +1,4 @@
-"""Извлечение метаданных видеофайлов через ffprobe."""
+"""Video file metadata extraction via ffprobe."""
 
 from __future__ import annotations
 
@@ -10,19 +10,19 @@ from models import AudioTrack, SubtitleTrack, VideoFile, VideoTrack
 
 
 def _run_ffprobe(path: Path, *extra_args: str) -> dict:
-    """Запустить ffprobe и вернуть JSON."""
+    """Run ffprobe and return JSON."""
     cmd = [
         "ffprobe", "-v", "quiet", "-print_format", "json",
         *extra_args, str(path),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if result.returncode != 0:
-        raise RuntimeError(f"ffprobe завершился с ошибкой: {result.stderr.strip()}")
+        raise RuntimeError(f"ffprobe failed with error: {result.stderr.strip()}")
     return json.loads(result.stdout)
 
 
 def _parse_fps(rate_str: str) -> float:
-    """Разобрать строку вида '24000/1001' или '25/1' в float."""
+    """Parse string like '24000/1001' or '25/1' into float."""
     if not rate_str or rate_str == "0/0":
         return 0.0
     if "/" in rate_str:
@@ -33,11 +33,11 @@ def _parse_fps(rate_str: str) -> float:
 
 
 def _detect_hdr(stream: dict, frames_data: dict | None) -> str:
-    """Определить тип HDR по метаданным потока и фреймов."""
+    """Detect HDR type from stream and frame metadata."""
     color_transfer = stream.get("color_transfer", "")
     color_primaries = stream.get("color_primaries", "")
 
-    # Проверяем Dolby Vision по side_data фреймов
+    # Check Dolby Vision via frame side_data
     if frames_data:
         for frame in frames_data.get("frames", []):
             for sd in frame.get("side_data_list", []):
@@ -47,7 +47,7 @@ def _detect_hdr(stream: dict, frames_data: dict | None) -> str:
 
     # HDR10 / HLG
     if color_transfer == "smpte2084" and color_primaries == "bt2020":
-        # Проверяем HDR10+ по side_data
+        # Check HDR10+ via side_data
         if frames_data:
             for frame in frames_data.get("frames", []):
                 for sd in frame.get("side_data_list", []):
@@ -62,15 +62,15 @@ def _detect_hdr(stream: dict, frames_data: dict | None) -> str:
 
 
 def _parse_bit_depth(stream: dict) -> int:
-    """Извлечь битовую глубину из потока."""
-    # bits_per_raw_sample — самый надёжный
+    """Extract bit depth from stream."""
+    # bits_per_raw_sample — most reliable
     raw = stream.get("bits_per_raw_sample")
     if raw and raw != "N/A":
         try:
             return int(raw)
         except ValueError:
             pass
-    # По pix_fmt
+    # By pix_fmt
     pix_fmt = stream.get("pix_fmt", "")
     if "10le" in pix_fmt or "10be" in pix_fmt:
         return 10
@@ -80,24 +80,24 @@ def _parse_bit_depth(stream: dict) -> int:
 
 
 def _detect_atmos(stream: dict) -> bool:
-    """Определить наличие Dolby Atmos в аудиопотоке.
+    """Detect Dolby Atmos in audio stream.
 
-    Atmos передаётся двумя способами:
-    - TrueHD + Atmos: в side_data или profile содержится "Atmos"
-    - EAC3 + JOC (Joint Object Coding): profile содержит "atmos" или
-      в side_data есть EMDF/JOC маркеры
-    Также часто маркируется в title трека.
+    Atmos is carried in two ways:
+    - TrueHD + Atmos: side_data or profile contains "Atmos"
+    - EAC3 + JOC (Joint Object Coding): profile contains "atmos" or
+      side_data has EMDF/JOC markers
+    Also commonly marked in track title.
     """
     codec = stream.get("codec_name", "")
     profile = stream.get("profile", "").lower()
     tags = stream.get("tags", {})
     title = tags.get("title", "").lower()
 
-    # По profile (ffprobe иногда показывает)
+    # By profile (ffprobe sometimes shows it)
     if "atmos" in profile:
         return True
 
-    # По title трека (частый способ маркировки)
+    # By track title (common marking method)
     if "atmos" in title:
         return True
 
@@ -105,7 +105,7 @@ def _detect_atmos(stream: dict) -> bool:
     if codec == "eac3" and "joc" in profile:
         return True
 
-    # По side_data_list (если есть)
+    # By side_data_list (if present)
     for sd in stream.get("side_data_list", []):
         sd_type = sd.get("side_data_type", "").lower()
         if "atmos" in sd_type or "joc" in sd_type:
@@ -115,7 +115,7 @@ def _detect_atmos(stream: dict) -> bool:
 
 
 def _detect_dtsx(stream: dict) -> bool:
-    """Определить наличие DTS:X в аудиопотоке."""
+    """Detect DTS:X in audio stream."""
     profile = stream.get("profile", "").lower()
     tags = stream.get("tags", {})
     title = tags.get("title", "").lower()
@@ -128,13 +128,21 @@ def _detect_dtsx(stream: dict) -> bool:
     return False
 
 
-def probe_file(path: Path) -> VideoFile:
-    """Извлечь полную информацию о видеофайле."""
+def probe_file(path: Path, use_cache: bool = True) -> VideoFile:
+    """Extract full video file information."""
+    from cache import get_cached, set_cached
+
     path = Path(path)
     if not path.exists():
-        raise FileNotFoundError(f"Файл не найден: {path}")
+        raise FileNotFoundError(f"File not found: {path}")
 
-    # Основные метаданные
+    # Check cache
+    if use_cache:
+        cached = get_cached(path)
+        if cached is not None:
+            return cached
+
+    # Core metadata
     data = _run_ffprobe(
         path,
         "-show_format", "-show_streams",
@@ -151,7 +159,7 @@ def probe_file(path: Path) -> VideoFile:
         overall_bitrate=int(fmt.get("bit_rate", 0)),
     )
 
-    # Собираем HDR-данные из фреймов (только для первого видеопотока)
+    # Collect HDR data from frames (first video stream only)
     frames_data = None
     video_streams = [s for s in streams if s.get("codec_type") == "video"]
     if video_streams:
@@ -166,7 +174,7 @@ def probe_file(path: Path) -> VideoFile:
         except Exception:
             frames_data = None
 
-    # Видеопоток (первый)
+    # Video stream (first)
     for s in streams:
         if s.get("codec_type") != "video":
             continue
@@ -189,7 +197,7 @@ def probe_file(path: Path) -> VideoFile:
             hdr_type=_detect_hdr(s, frames_data),
             duration=float(s.get("duration", 0) or 0),
         )
-        # Если битрейт видео не указан — оценим из общего
+        # If video bitrate is missing — estimate from overall
         if vf.video.bitrate == 0 and vf.overall_bitrate > 0:
             audio_total = sum(
                 int(a.get("bit_rate", 0) or 0)
@@ -198,7 +206,7 @@ def probe_file(path: Path) -> VideoFile:
             vf.video.bitrate = max(0, vf.overall_bitrate - audio_total)
         break
 
-    # Аудиопотоки
+    # Audio streams
     for s in streams:
         if s.get("codec_type") != "audio":
             continue
@@ -207,7 +215,7 @@ def probe_file(path: Path) -> VideoFile:
         codec_name = s.get("codec_name", "")
         profile = s.get("profile", "")
 
-        # Определяем Atmos / DTS:X / lossless
+        # Detect Atmos / DTS:X / lossless
         has_atmos = _detect_atmos(s)
         has_dtsx = _detect_dtsx(s)
         is_lossless = codec_name in ("truehd", "flac", "pcm_s16le", "pcm_s24le",
@@ -233,7 +241,7 @@ def probe_file(path: Path) -> VideoFile:
             is_lossless=is_lossless,
         ))
 
-    # Субтитры
+    # Subtitles
     for s in streams:
         if s.get("codec_type") != "subtitle":
             continue
@@ -246,5 +254,9 @@ def probe_file(path: Path) -> VideoFile:
             forced=bool(disp.get("forced", 0)),
             default=bool(disp.get("default", 0)),
         ))
+
+    # Save to cache
+    if use_cache:
+        set_cached(path, vf)
 
     return vf

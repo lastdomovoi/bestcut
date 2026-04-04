@@ -1,4 +1,4 @@
-"""Сравнение видеофайлов и форматирование результатов."""
+"""Video file comparison and result formatting."""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ from scoring import bits_per_pixel, effective_bitrate, score_breakdown
 
 
 def compare_pair(a: VideoFile, b: VideoFile) -> dict:
-    """Сравнить два видеофайла и определить лучший."""
+    """Compare two video files and determine the winner."""
     winner_abs = a if a.score > b.score else b
     loser_abs = b if winner_abs is a else a
 
-    # Эффективность: качество на гигабайт
+    # Efficiency: quality per gigabyte
     eff_a = a.score / a.file_size_gb if a.file_size_gb > 0 else 0
     eff_b = b.score / b.file_size_gb if b.file_size_gb > 0 else 0
     winner_eff = a if eff_a > eff_b else b
@@ -35,10 +35,10 @@ def compare_pair(a: VideoFile, b: VideoFile) -> dict:
 
 
 def format_file_info(vf: VideoFile, verbose: bool = False, weights: ScoringWeights | None = None) -> str:
-    """Форматировать информацию о файле для вывода."""
+    """Format file information for output."""
     lines = []
-    lines.append(f"  Файл: {vf.path.name}")
-    lines.append(f"  Размер: {vf.file_size_human} | Длительность: {vf.duration_human}")
+    lines.append(f"  File: {vf.path.name}")
+    lines.append(f"  Size: {vf.file_size_human} | Duration: {vf.duration_human}")
 
     v = vf.video
     codec_info = v.codec.upper()
@@ -55,11 +55,11 @@ def format_file_info(vf: VideoFile, verbose: bool = False, weights: ScoringWeigh
 
     br_mbps = v.bitrate / 1_000_000 if v.bitrate else 0
     lines.append(
-        f"  Видео: {codec_info} | {v.width}x{v.height} ({v.resolution_label}) | "
-        f"{v.fps:.2f} fps | {br_mbps:.1f} Мбит/с{hdr_str}"
+        f"  Video: {codec_info} | {v.width}x{v.height} ({v.resolution_label}) | "
+        f"{v.fps:.2f} fps | {br_mbps:.1f} Mbps{hdr_str}"
     )
 
-    # Аудио
+    # Audio
     for i, at in enumerate(vf.audio_tracks):
         br_kbps = at.bitrate / 1000 if at.bitrate else 0
         lang = at.language or "?"
@@ -67,12 +67,12 @@ def format_file_info(vf: VideoFile, verbose: bool = False, weights: ScoringWeigh
         spatial_str = f" [{at.spatial_format}]" if at.spatial_format else ""
         lossless_str = " (lossless)" if at.is_lossless and not at.spatial_format else ""
         lines.append(
-            f"  Аудио #{i + 1}: {at.format_label} {at.channel_label} "
-            f"({at.channels}ch) | {br_kbps:.0f} кбит/с | "
+            f"  Audio #{i + 1}: {at.format_label} {at.channel_label} "
+            f"({at.channels}ch) | {br_kbps:.0f} kbps | "
             f"{lang}{spatial_str}{lossless_str}{title_str}"
         )
 
-    # Субтитры
+    # Subtitles
     if vf.subtitle_tracks:
         subs = []
         for st in vf.subtitle_tracks:
@@ -81,41 +81,41 @@ def format_file_info(vf: VideoFile, verbose: bool = False, weights: ScoringWeigh
                 s += "(F)"
             s += f"/{st.codec}"
             subs.append(s)
-        lines.append(f"  Субтитры: {', '.join(subs)}")
+        lines.append(f"  Subtitles: {', '.join(subs)}")
 
-    # Целостность
+    # Integrity
     if vf.integrity.checked:
         if vf.integrity.is_ok:
-            lines.append("  Целостность: ОК")
+            lines.append("  Integrity: OK")
         else:
-            lines.append(f"  Целостность: {vf.integrity.error_count} ошибок")
+            lines.append(f"  Integrity: {vf.integrity.error_count} errors")
             if vf.integrity.is_truncated:
-                lines.append("  ⚠ ФАЙЛ ОБРЕЗАН")
+                lines.append("  ⚠ FILE TRUNCATED")
             if verbose:
                 for err in vf.integrity.errors[:5]:
                     lines.append(f"    - {err}")
 
-    # Совместимость
+    # Compatibility
     if vf.compatibility_issues:
-        lines.append(f"  Совместимость: {len(vf.compatibility_issues)} проблем")
+        lines.append(f"  Compatibility: {len(vf.compatibility_issues)} issues")
         if verbose:
             for issue in vf.compatibility_issues:
                 lines.append(f"    - {issue}")
 
-    # Баллы
+    # Score
     if verbose:
         breakdown = score_breakdown(vf, weights)
-        lines.append("  Баллы:")
+        lines.append("  Score:")
         for name, val in breakdown.items():
             lines.append(f"    {name}: {val:.1f}")
 
-    lines.append(f"  ИТОГО: {vf.score:.1f} баллов")
+    lines.append(f"  TOTAL: {vf.score:.1f} points")
 
     return "\n".join(lines)
 
 
 def format_comparison(comp: dict, verbose: bool = False) -> str:
-    """Форматировать результат сравнения двух файлов."""
+    """Format comparison result of two files."""
     a = comp["file_a"]
     b = comp["file_b"]
     lines = []
@@ -130,23 +130,23 @@ def format_comparison(comp: dict, verbose: bool = False) -> str:
     loser = a if winner is b else b
 
     if comp["score_diff"] < 2.0:
-        lines.append(f"Результат: примерно равны (разница {comp['score_diff']:.1f})")
+        lines.append(f"Result: roughly equal (difference {comp['score_diff']:.1f})")
     else:
         lines.append(
-            f"Лучший по качеству: {winner.path.name} "
+            f"Best quality: {winner.path.name} "
             f"({winner.score:.1f} vs {loser.score:.1f}, +{comp['score_diff']:.1f})"
         )
 
     eff_winner = comp["efficiency_winner"]
     if eff_winner is not winner:
         lines.append(
-            f"Лучший по эффективности (качество/размер): {eff_winner.path.name} "
+            f"Best efficiency (quality/size): {eff_winner.path.name} "
             f"({comp[f'efficiency_{"a" if eff_winner is a else "b"}']:.1f} vs "
-            f"{comp[f'efficiency_{"b" if eff_winner is a else "a"}']:.1f} балл/ГБ)"
+            f"{comp[f'efficiency_{"b" if eff_winner is a else "a"}']:.1f} pts/GB)"
         )
 
     if comp["size_diff_mb"] > 100:
-        lines.append(f"Разница в размере: {comp['size_diff_mb']:.0f} МБ")
+        lines.append(f"Size difference: {comp['size_diff_mb']:.0f} MB")
 
     lines.append("=" * 70)
     return "\n".join(lines)
@@ -159,7 +159,7 @@ def format_group_comparison(
     verbose: bool = False,
     weights: ScoringWeights | None = None,
 ) -> str:
-    """Форматировать сравнение группы файлов (один эпизод, несколько версий)."""
+    """Format comparison of a file group (one episode, multiple versions)."""
     lines = []
 
     season, episode = episode_key
@@ -176,29 +176,29 @@ def format_group_comparison(
 
     if len(files) == 1:
         lines.append(format_file_info(files[0], verbose, weights))
-        lines.append(f"  (единственная версия)")
+        lines.append(f"  (only version)")
         return "\n".join(lines)
 
-    # Сортировка по баллам
+    # Sort by score
     ranked = sorted(files, key=lambda f: f.score, reverse=True)
 
     for i, vf in enumerate(ranked):
-        marker = " ★ ЛУЧШИЙ" if i == 0 else ""
+        marker = " ★ BEST" if i == 0 else ""
         lines.append(f"\n  #{i + 1}{marker}")
         lines.append(format_file_info(vf, verbose, weights))
 
-    # Сводка
+    # Summary
     best = ranked[0]
-    lines.append(f"\n  Рекомендация: {best.path.name}")
+    lines.append(f"\n  Recommendation: {best.path.name}")
     if len(ranked) > 1:
         diff = best.score - ranked[1].score
-        lines.append(f"  Преимущество: +{diff:.1f} баллов над следующим")
+        lines.append(f"  Advantage: +{diff:.1f} points over next")
 
     return "\n".join(lines)
 
 
 def export_json(files: list[VideoFile]) -> str:
-    """Экспортировать результаты в JSON."""
+    """Export results to JSON."""
     result = []
     for vf in files:
         entry = {

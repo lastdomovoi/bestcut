@@ -1,4 +1,4 @@
-"""Датаклассы для хранения информации о видеофайлах."""
+"""Dataclasses for storing video file information."""
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ class AudioTrack:
 
     @property
     def spatial_format(self) -> str:
-        """Формат пространственного аудио."""
+        """Spatial audio format."""
         if self.has_atmos:
             return "Dolby Atmos"
         if self.has_dtsx:
@@ -70,7 +70,7 @@ class AudioTrack:
 
     @property
     def format_label(self) -> str:
-        """Полное описание аудиоформата."""
+        """Full audio format description."""
         base = self.codec.upper()
         if self.codec == "truehd" and self.has_atmos:
             return "TrueHD Atmos"
@@ -146,7 +146,7 @@ class VideoFile:
     score: float = 0.0
     compatibility_score: float = 0.0
     compatibility_issues: list[str] = field(default_factory=list)
-    # Для матчинга эпизодов
+    # For episode matching
     series_title: str = ""
     season: int | None = None
     episode: int | None = None
@@ -158,11 +158,11 @@ class VideoFile:
     @property
     def file_size_human(self) -> str:
         size = self.file_size
-        for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
+        for unit in ("B", "KB", "MB", "GB", "TB"):
             if size < 1024:
                 return f"{size:.1f} {unit}"
             size /= 1024
-        return f"{size:.1f} ПБ"
+        return f"{size:.1f} PB"
 
     @property
     def duration_human(self) -> str:
