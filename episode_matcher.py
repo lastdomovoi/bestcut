@@ -96,16 +96,42 @@ def normalize_title(filename: str) -> str:
     return re.sub(r'\s+', ' ', name).strip()
 
 
+def _normalize_path(path: Path) -> Path:
+    """Normalize Unicode in path (macOS uses NFD, Python strings NFC)."""
+    import unicodedata
+    return Path(unicodedata.normalize("NFC", str(path)))
+
+
 def scan_directory(path: Path) -> list[Path]:
     """Recursively find all video files in a directory."""
     path = Path(path)
+
+    # macOS NFD vs NFC: if path doesn't exist, try NFC-normalized version
+    if not path.exists():
+        nfc = _normalize_path(path)
+        if nfc.exists():
+            path = nfc
+        else:
+            # Try finding via parent directory listing
+            parent = path.parent
+            if parent.exists():
+                target = path.name
+                import unicodedata
+                target_nfc = unicodedata.normalize("NFC", target)
+                for f in parent.iterdir():
+                    f_nfc = unicodedata.normalize("NFC", f.name)
+                    if f_nfc == target_nfc:
+                        path = f
+                        break
+
     if path.is_file():
         return [path] if path.suffix.lower() in VIDEO_EXTENSIONS else []
 
     files = []
-    for f in sorted(path.rglob("*")):
-        if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS:
-            files.append(f)
+    if path.is_dir():
+        for f in sorted(path.rglob("*")):
+            if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS:
+                files.append(f)
     return files
 
 
