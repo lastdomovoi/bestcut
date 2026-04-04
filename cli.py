@@ -178,7 +178,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
     # JSON output
     if args.json:
-        print(export_json(video_files))
+        print(export_json(video_files, cfg=cfg))
         return 0
 
     # Grouping and comparison
@@ -323,7 +323,7 @@ def cmd_info(args: argparse.Namespace) -> int:
             try:
                 vf = process_file(fp, check_integrity="quick", verbose=True,
                                   weights=weights, cfg=cfg)
-                print(format_file_info(vf, verbose=True, weights=weights))
+                print(format_file_info(vf, verbose=True, weights=weights, cfg=cfg))
                 print()
             except Exception as e:
                 print(f"ERROR {fp}: {e}", file=sys.stderr)

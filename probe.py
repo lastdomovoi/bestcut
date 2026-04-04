@@ -432,9 +432,9 @@ def probe_file(path: Path, use_cache: bool = True) -> VideoFile:
     vf = VideoFile(
         path=path,
         container=fmt.get("format_name", ""),
-        file_size=int(fmt.get("size", 0)),
-        duration=float(fmt.get("duration", 0)),
-        overall_bitrate=int(fmt.get("bit_rate", 0)),
+        file_size=int(fmt.get("size") or 0),
+        duration=float(fmt.get("duration") or 0),
+        overall_bitrate=int(fmt.get("bit_rate") or 0),
     )
 
     # Collect HDR data from frames (first video stream only)

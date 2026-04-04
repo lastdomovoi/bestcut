@@ -34,7 +34,7 @@ def compare_pair(a: VideoFile, b: VideoFile) -> dict:
     }
 
 
-def format_file_info(vf: VideoFile, verbose: bool = False, weights: ScoringWeights | None = None) -> str:
+def format_file_info(vf: VideoFile, verbose: bool = False, weights: ScoringWeights | None = None, cfg=None) -> str:
     """Format file information for output."""
     lines = []
     lines.append(f"  File: {vf.path.name}")
@@ -104,7 +104,16 @@ def format_file_info(vf: VideoFile, verbose: bool = False, weights: ScoringWeigh
 
     # Score
     if verbose:
-        breakdown = score_breakdown(vf, weights)
+        _lang_kw = {}
+        if cfg and cfg.primary_language:
+            _lang_kw = {
+                "primary_language": cfg.primary_language,
+                "extra_languages": cfg.extra_languages,
+                "missing_primary_penalty": cfg.missing_primary_penalty,
+                "extra_primary_track_bonus": cfg.extra_primary_track_bonus,
+                "extra_language_bonus": cfg.extra_language_bonus,
+            }
+        breakdown = score_breakdown(vf, weights, **_lang_kw)
         lines.append("  Score:")
         for name, val in breakdown.items():
             lines.append(f"    {name}: {val:.1f}")
@@ -612,16 +621,17 @@ def _summarize_differences(ranked: list[VideoFile]) -> list[str]:
             diffs.append(f"{_GREEN}+{_RESET} #1 has subtitles, #{ranked.index(other)+1} has none")
 
         # Size
-        size_ratio = best.file_size / other.file_size if other.file_size else 0
-        if size_ratio > 1.3:
-            diffs.append(f"Size: #1 is {size_ratio:.1f}x larger ({best.file_size_human} vs {other.file_size_human})")
-        elif size_ratio < 0.7:
-            diffs.append(f"{_GREEN}+{_RESET} Size: #1 is {1/size_ratio:.1f}x smaller")
+        if best.file_size and other.file_size:
+            size_ratio = best.file_size / other.file_size
+            if size_ratio > 1.3:
+                diffs.append(f"Size: #1 is {size_ratio:.1f}x larger ({best.file_size_human} vs {other.file_size_human})")
+            elif size_ratio < 0.7:
+                diffs.append(f"{_GREEN}+{_RESET} Size: #1 is {1/size_ratio:.1f}x smaller")
 
     return diffs
 
 
-def export_json(files: list[VideoFile]) -> str:
+def export_json(files: list[VideoFile], cfg=None) -> str:
     """Export results to JSON."""
     result = []
     for vf in files:
@@ -694,7 +704,14 @@ def export_json(files: list[VideoFile]) -> str:
             "compatibility_score": vf.compatibility_score,
             "compatibility_issues": vf.compatibility_issues,
             "score": vf.score,
-            "score_breakdown": score_breakdown(vf),
+            "score_breakdown": score_breakdown(vf, **(
+                {"primary_language": cfg.primary_language,
+                 "extra_languages": cfg.extra_languages,
+                 "missing_primary_penalty": cfg.missing_primary_penalty,
+                 "extra_primary_track_bonus": cfg.extra_primary_track_bonus,
+                 "extra_language_bonus": cfg.extra_language_bonus}
+                if cfg and cfg.primary_language else {}
+            )),
             "series_title": vf.series_title,
             "season": vf.season,
             "episode": vf.episode,
