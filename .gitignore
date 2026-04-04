@@ -3,4 +3,5 @@ __pycache__/
 .claude/
 CLAUDE.md
 .cache/
+.remember/
 config.toml
