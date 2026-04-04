@@ -66,7 +66,7 @@ def process_file(
         vf.integrity.warnings.extend(sync_issues)
 
     # Compatibility
-    compat = check_compatibility(vf)
+    compat = check_compatibility(vf, devices=cfg.devices or None)
     vf.compatibility_score = compatibility_score(vf)
     all_issues = []
     for dev_id, issues in compat.items():
@@ -307,19 +307,23 @@ def _print_delete_recommendations(
         print(f"  ... and {len(to_keep) - 5} more")
 
     print(f"\n  To delete, run:")
-    print(f"  video-compare ... --recommend-delete --json | jq -r '.[] | .path' | xargs rm")
+    print(f"  video-compare ... --recommend-delete --json | jq -r '.[] | .path' | tr '\\n' '\\0' | xargs -0 rm")
     print(f"\n  ⚠ WARNING: review the list before deleting!")
 
 
 def cmd_info(args: argparse.Namespace) -> int:
     """Detailed file information."""
+    from config import Config
+    cfg = getattr(args, '_cfg', None) or Config()
+    weights = _resolve_weights(args, cfg)
     for p in args.paths:
         path = Path(p)
         files = scan_directory(path)
         for fp in files:
             try:
-                vf = process_file(fp, check_integrity="quick", verbose=True)
-                print(format_file_info(vf, verbose=True))
+                vf = process_file(fp, check_integrity="quick", verbose=True,
+                                  weights=weights, cfg=cfg)
+                print(format_file_info(vf, verbose=True, weights=weights))
                 print()
             except Exception as e:
                 print(f"ERROR {fp}: {e}", file=sys.stderr)

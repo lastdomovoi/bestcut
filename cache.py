@@ -43,6 +43,14 @@ def _serialize(vf: VideoFile) -> dict:
     }
 
 
+def _safe_construct(cls, data: dict):
+    """Construct a dataclass from dict, ignoring unknown fields and
+    supplying defaults for missing ones."""
+    import dataclasses
+    valid = {f.name for f in dataclasses.fields(cls)}
+    return cls(**{k: v for k, v in data.items() if k in valid})
+
+
 def _deserialize(data: dict) -> VideoFile:
     """Restore VideoFile from dict."""
     vf = VideoFile(
@@ -51,9 +59,9 @@ def _deserialize(data: dict) -> VideoFile:
         file_size=data["file_size"],
         duration=data["duration"],
         overall_bitrate=data["overall_bitrate"],
-        video=VideoTrack(**data["video"]),
-        audio_tracks=[AudioTrack(**a) for a in data["audio_tracks"]],
-        subtitle_tracks=[SubtitleTrack(**s) for s in data["subtitle_tracks"]],
+        video=_safe_construct(VideoTrack, data["video"]),
+        audio_tracks=[_safe_construct(AudioTrack, a) for a in data["audio_tracks"]],
+        subtitle_tracks=[_safe_construct(SubtitleTrack, s) for s in data["subtitle_tracks"]],
     )
     return vf
 
