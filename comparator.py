@@ -139,10 +139,11 @@ def format_comparison(comp: dict, verbose: bool = False) -> str:
 
     eff_winner = comp["efficiency_winner"]
     if eff_winner is not winner:
+        ew_key = "efficiency_a" if eff_winner is a else "efficiency_b"
+        el_key = "efficiency_b" if eff_winner is a else "efficiency_a"
         lines.append(
             f"Best efficiency (quality/size): {eff_winner.path.name} "
-            f"({comp[f'efficiency_{"a" if eff_winner is a else "b"}']:.1f} vs "
-            f"{comp[f'efficiency_{"b" if eff_winner is a else "a"}']:.1f} pts/GB)"
+            f"({comp[ew_key]:.1f} vs {comp[el_key]:.1f} pts/GB)"
         )
 
     if comp["size_diff_mb"] > 100:
@@ -224,7 +225,6 @@ def _colorize_row(label: str, cells: list[str], higher_is_better: bool = True,
 
 # Rules: label -> (higher_is_better, threshold)
 _COLOR_RULES: dict[str, tuple[bool, float]] = {
-    "Size": (False, 0.1),           # Smaller is not always better, but show diff
     "Bitrate": (True, 0.1),
     "BPP": (True, 0.15),
     "FPS": (True, 0.1),            # Context-dependent, but show diff
@@ -439,7 +439,7 @@ def format_group_comparison(
             rows.append([label, *[f"{d.get(key, 0.0):.1f}" for d in bd]])
 
         rows.append(["", *["" for _ in ranked]])
-        rows.append(["TOTAL", *[f"{_BOLD}{vf.score:.1f}{_RESET}" for vf in ranked]])
+        rows.append(["TOTAL", *[f"{vf.score:.1f}" for vf in ranked]])
 
         # Apply color highlighting
         for i, row in enumerate(rows):
@@ -448,6 +448,11 @@ def format_group_comparison(
             if rule:
                 higher_better, thresh = rule
                 row[1:] = _colorize_row(label, row[1:], higher_better, thresh)
+
+        # Bold TOTAL row after colorization
+        for i, row in enumerate(rows):
+            if row[0] == "TOTAL":
+                row[1:] = [f"{_BOLD}{c}{_RESET}" for c in row[1:]]
 
     else:
         headers = ["", "#1 ★ BEST", *[f"#{i+2}" for i in range(len(ranked)-1)]]
@@ -495,6 +500,9 @@ def format_group_comparison(
 
     # Recommendation
     best = ranked[0]
+    if len(ranked) < 2:
+        lines.append(f"  (only version)")
+        return "\n".join(lines)
     diff = best.score - ranked[1].score
     if diff < 2.0:
         lines.append(f"  Result: roughly equal (difference {diff:.1f})")

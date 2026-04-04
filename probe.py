@@ -187,6 +187,9 @@ def detect_real_channels(path: Path, stream_index: int, channels: int,
     for val in tail[:channels]:
         try:
             db = float(val)
+            # Treat inf/-inf as silence
+            if db == float("inf") or db == float("-inf"):
+                db = -200.0
         except ValueError:
             db = -200.0
         ch_rms.append(db)

@@ -138,12 +138,14 @@ def _check_androidtv_extras(vf: VideoFile, profile: dict) -> list[str]:
 
     # H.264 10-bit
     if vf.video.codec == "h264" and vf.video.bit_depth == 10:
-        issues.append(notes["h264_10bit"])
+        if "h264_10bit" in notes:
+            issues.append(notes["h264_10bit"])
 
     # HEVC 4K@60fps on low-end SoCs
     if (vf.video.codec == "hevc" and vf.video.width >= 3840
             and vf.video.fps > 30):
-        issues.append(notes["hevc_4k60"])
+        if "hevc_4k60" in notes:
+            issues.append(notes["hevc_4k60"])
 
     # Resolution above 4K
     max_res = profile.get("max_resolution")
@@ -155,22 +157,22 @@ def _check_androidtv_extras(vf: VideoFile, profile: dict) -> list[str]:
 
     # TrueHD/Atmos — passthrough warning
     for at in vf.audio_tracks:
-        if at.codec == "truehd":
+        if at.codec == "truehd" and "truehd" in notes:
             issues.append(notes["truehd"])
             break
 
     # DTS-HD MA / DTS:X — warning
     for at in vf.audio_tracks:
-        if at.codec in ("dts", "dca") and at.is_lossless:
+        if at.codec in ("dts", "dca") and at.is_lossless and "dts_hdma" in notes:
             issues.append(notes["dts_hdma"])
             break
 
     # Dolby Vision
-    if vf.video.hdr_type == "dolby_vision":
+    if vf.video.hdr_type == "dolby_vision" and "dolby_vision" in notes:
         issues.append(notes["dolby_vision"])
 
     # PGS в 4K
-    if vf.video.width >= 3840:
+    if vf.video.width >= 3840 and "pgs_4k" in notes:
         has_pgs = any(st.codec == "hdmv_pgs_subtitle" for st in vf.subtitle_tracks)
         if has_pgs:
             issues.append(notes["pgs_4k"])

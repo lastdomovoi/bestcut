@@ -88,6 +88,9 @@ def clear_cache() -> int:
     count = 0
     if CACHE_DIR.exists():
         for f in CACHE_DIR.glob("*.json"):
-            f.unlink()
-            count += 1
+            try:
+                f.unlink()
+                count += 1
+            except OSError:
+                pass
     return count
