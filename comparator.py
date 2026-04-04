@@ -152,13 +152,111 @@ def format_comparison(comp: dict, verbose: bool = False) -> str:
     return "\n".join(lines)
 
 
+import re as _re
+
+# ANSI color codes
+_GREEN = "\033[32m"
+_RED = "\033[31m"
+_RESET = "\033[0m"
+_BOLD = "\033[1m"
+
+
+def _colorize_row(label: str, cells: list[str], higher_is_better: bool = True,
+                  threshold: float = 0.1) -> list[str]:
+    """Colorize cells: green for best, red for worst if they differ significantly.
+
+    Tries to parse numeric values from cells. If all cells are parseable and
+    differ by more than threshold (relative), apply colors.
+    """
+    if len(cells) < 2:
+        return cells
+
+    # Try to extract numeric values
+    vals: list[float | None] = []
+    for c in cells:
+        # Strip ANSI, units, and common suffixes
+        clean = _re.sub(r"\033\[[0-9;]*m", "", c).strip()
+        clean = _re.sub(r"\s*(Mbps|GB|MB|kbps|kHz|k|pts|points|tracks|issues|bit|-bit|%)\s*$", "", clean, flags=_re.IGNORECASE)
+        clean = clean.replace(",", "").strip()
+        if clean in ("-", "", "?"):
+            vals.append(None)
+            continue
+        try:
+            vals.append(float(clean))
+        except ValueError:
+            vals.append(None)
+
+    # Need at least 2 valid numbers
+    valid = [v for v in vals if v is not None]
+    if len(valid) < 2:
+        return cells
+
+    vmin, vmax = min(valid), max(valid)
+    if vmax == 0:
+        return cells
+    # Check if difference is significant
+    rel_diff = (vmax - vmin) / vmax if vmax != 0 else 0
+    if rel_diff < threshold:
+        return cells
+
+    # Apply colors
+    result = []
+    for c, v in zip(cells, vals):
+        if v is None:
+            result.append(c)
+            continue
+        if higher_is_better:
+            if v == vmax:
+                result.append(f"{_GREEN}{c}{_RESET}")
+            elif v == vmin:
+                result.append(f"{_RED}{c}{_RESET}")
+            else:
+                result.append(c)
+        else:
+            if v == vmin:
+                result.append(f"{_GREEN}{c}{_RESET}")
+            elif v == vmax:
+                result.append(f"{_RED}{c}{_RESET}")
+            else:
+                result.append(c)
+    return result
+
+
+# Rules: label -> (higher_is_better, threshold)
+_COLOR_RULES: dict[str, tuple[bool, float]] = {
+    "Size": (False, 0.1),           # Smaller is not always better, but show diff
+    "Bitrate": (True, 0.1),
+    "BPP": (True, 0.15),
+    "FPS": (True, 0.1),            # Context-dependent, but show diff
+    "Bit depth": (True, 0.05),
+    "Compat issues": (False, 0.2),
+    "Audio (rus)": (True, 0.3),
+    "Audio total": (True, 0.3),
+    # Score breakdown rows
+    "Resolution": (True, 0.1),
+    "Video quality": (True, 0.1),
+    "HDR": (True, 0.1),
+    "Audio": (True, 0.1),
+    "Subtitles": (True, 0.1),
+    "Compatibility": (True, 0.1),
+    "Integrity": (True, 0.1),
+    "Language tracks": (True, 0.1),
+    "TOTAL": (True, 0.01),
+}
+
+
+def _visible_len(s: str) -> int:
+    """Length of string excluding ANSI escape codes."""
+    return len(_re.sub(r"\033\[[0-9;]*m", "", s))
+
+
 def _render_table(headers: list[str], rows: list[list[str]], highlight_row: int = 0) -> str:
     """Render a simple ASCII table. First row (highlight_row) gets a ★ marker."""
-    # Calculate column widths
-    col_widths = [len(h) for h in headers]
+    # Calculate column widths based on visible (non-ANSI) length
+    col_widths = [_visible_len(h) for h in headers]
     for row in rows:
         for i, cell in enumerate(row):
-            col_widths[i] = max(col_widths[i], len(cell))
+            col_widths[i] = max(col_widths[i], _visible_len(cell))
 
     # Header
     sep = "+-" + "-+-".join("-" * w for w in col_widths) + "-+"
@@ -169,11 +267,13 @@ def _render_table(headers: list[str], rows: list[list[str]], highlight_row: int 
     for i, row in enumerate(rows):
         cells = []
         for j, (cell, w) in enumerate(zip(row, col_widths)):
+            vlen = _visible_len(cell)
+            pad = w - vlen
             # Right-align numeric columns (all except first)
             if j == 0:
-                cells.append(cell.ljust(w))
+                cells.append(cell + " " * pad)
             else:
-                cells.append(cell.rjust(w))
+                cells.append(" " * pad + cell)
         lines.append("| " + " | ".join(cells) + " |")
 
     lines.append(sep)
@@ -320,21 +420,8 @@ def format_group_comparison(
                 for vf in ranked
             ]],
         ]
-        # All audio tracks
-        max_audio = max(len(vf.audio_tracks) for vf in ranked) if ranked else 0
-        for ai in range(max_audio):
-            label = f"Audio #{ai + 1}"
-            cells = []
-            for vf in ranked:
-                if ai < len(vf.audio_tracks):
-                    at = vf.audio_tracks[ai]
-                    tracks = _audio_tracks_detail(vf)
-                    cells.append(tracks[ai])
-                else:
-                    cells.append("-")
-            rows.append([label, *cells])
-
-        # Audio summary
+        # Audio summary in main table
+        rows.append(["Audio (best)", *[_audio_summary(vf) for vf in ranked]])
         if cfg and cfg.primary_language:
             lang = cfg.primary_language
             rows.append([f"Audio ({lang})", *[
@@ -352,7 +439,16 @@ def format_group_comparison(
             rows.append([label, *[f"{d.get(key, 0.0):.1f}" for d in bd]])
 
         rows.append(["", *["" for _ in ranked]])
-        rows.append(["TOTAL", *[f"{vf.score:.1f}" for vf in ranked]])
+        rows.append(["TOTAL", *[f"{_BOLD}{vf.score:.1f}{_RESET}" for vf in ranked]])
+
+        # Apply color highlighting
+        for i, row in enumerate(rows):
+            label = row[0]
+            rule = _COLOR_RULES.get(label)
+            if rule:
+                higher_better, thresh = rule
+                row[1:] = _colorize_row(label, row[1:], higher_better, thresh)
+
     else:
         headers = ["", "#1 ★ BEST", *[f"#{i+2}" for i in range(len(ranked)-1)]]
         rows = [
@@ -379,13 +475,39 @@ def format_group_comparison(
 
     lines.append(_render_table(headers, rows))
 
+    # Audio detail table (verbose only)
+    if verbose and len(ranked) >= 2:
+        max_audio = max(len(vf.audio_tracks) for vf in ranked) if ranked else 0
+        if max_audio > 0:
+            lines.append(f"\n  Audio tracks:")
+            a_headers = ["", *[f"#{i+1}" for i in range(len(ranked))]]
+            a_rows = []
+            for ai in range(max_audio):
+                cells = []
+                for vf in ranked:
+                    if ai < len(vf.audio_tracks):
+                        tracks = _audio_tracks_detail(vf)
+                        cells.append(tracks[ai])
+                    else:
+                        cells.append("-")
+                a_rows.append([f"Track #{ai+1}", *cells])
+            lines.append(_render_table(a_headers, a_rows))
+
     # Recommendation
     best = ranked[0]
     diff = best.score - ranked[1].score
     if diff < 2.0:
         lines.append(f"  Result: roughly equal (difference {diff:.1f})")
     else:
-        lines.append(f"  Recommendation: {best.path.name} (+{diff:.1f} pts)")
+        lines.append(f"  {_GREEN}{_BOLD}Recommendation: {best.path.name} (+{diff:.1f} pts){_RESET}")
+
+    # Key differences summary
+    if len(ranked) >= 2:
+        diffs = _summarize_differences(ranked)
+        if diffs:
+            lines.append(f"\n  Key differences:")
+            for d in diffs:
+                lines.append(f"    {d}")
 
     # Duration difference warning
     if len(ranked) >= 2:
@@ -397,18 +519,96 @@ def format_group_comparison(
             if diff_sec > 10:
                 diff_m, diff_s = divmod(int(diff_sec), 60)
                 pct = (diff_sec / max_dur) * 100
-                longest = [vf for vf in ranked if vf.duration == max_dur][0]
-                shortest = [vf for vf in ranked if vf.duration == min_dur][0]
                 if diff_sec > 300:
                     lines.append(
-                        f"  !! Duration differs by {diff_m}m{diff_s:02d}s ({pct:.1f}%) — "
-                        f"likely different edit/version"
+                        f"  {_RED}!! Duration differs by {diff_m}m{diff_s:02d}s ({pct:.1f}%) — "
+                        f"likely different edit/version{_RESET}"
                     )
                 else:
                     lines.append(
                         f"  ~ Duration differs by {diff_m}m{diff_s:02d}s ({pct:.1f}%)")
 
     return "\n".join(lines)
+
+
+def _summarize_differences(ranked: list[VideoFile]) -> list[str]:
+    """Generate a list of key differences between ranked files."""
+    best = ranked[0]
+    rest = ranked[1:]
+    diffs = []
+
+    for other in rest:
+        tag = other.path.name
+
+        # Video bitrate
+        if best.video.bitrate and other.video.bitrate:
+            br_ratio = best.video.bitrate / other.video.bitrate if other.video.bitrate else 0
+            if br_ratio > 1.2:
+                diffs.append(f"{_GREEN}+{_RESET} Video bitrate {best.video.bitrate/1e6:.1f} vs {other.video.bitrate/1e6:.1f} Mbps")
+            elif br_ratio < 0.8:
+                diffs.append(f"{_RED}-{_RESET} Video bitrate {best.video.bitrate/1e6:.1f} vs {other.video.bitrate/1e6:.1f} Mbps")
+
+        # Resolution
+        if best.video.height != other.video.height:
+            diffs.append(f"Resolution: {best.video.resolution_label} vs {other.video.resolution_label}")
+
+        # Codec
+        if best.video.codec != other.video.codec:
+            diffs.append(f"Codec: {best.video.codec.upper()} vs {other.video.codec.upper()}")
+
+        # FPS
+        if best.video.fps != other.video.fps:
+            diffs.append(f"FPS: {best.video.fps:.0f} vs {other.video.fps:.0f}")
+
+        # HDR
+        if best.video.hdr_type != other.video.hdr_type:
+            diffs.append(f"HDR: {best.video.hdr_type or 'SDR'} vs {other.video.hdr_type or 'SDR'}")
+
+        # Aspect ratio / black bars
+        if best.video.has_black_bars != other.video.has_black_bars:
+            if other.video.has_black_bars:
+                diffs.append(f"{_RED}-{_RESET} #{len(ranked)} has black bars")
+            else:
+                diffs.append(f"{_RED}-{_RESET} #1 has black bars")
+
+        # Upscale
+        if other.video.is_upscaled and not best.video.is_upscaled:
+            h = f" (~{other.video.real_height}p)" if other.video.real_height else ""
+            diffs.append(f"{_RED}-{_RESET} #{ranked.index(other)+1} is upscaled{h}")
+
+        # Audio: fake channels
+        for at in other.audio_tracks:
+            if at.real_channels is not None and at.real_channels < at.channels:
+                diffs.append(f"{_RED}-{_RESET} #{ranked.index(other)+1} has fake {at.channel_label}")
+                break
+
+        # Audio channels (best track)
+        best_ch = max((at.effective_channels for at in best.audio_tracks), default=0)
+        other_ch = max((at.effective_channels for at in other.audio_tracks), default=0)
+        if best_ch != other_ch:
+            b_label = "Mono" if best_ch <= 1 else f"{best_ch}ch"
+            o_label = "Mono" if other_ch <= 1 else f"{other_ch}ch"
+            if best_ch > other_ch:
+                diffs.append(f"{_GREEN}+{_RESET} Audio: {b_label} vs {o_label}")
+            else:
+                diffs.append(f"{_RED}-{_RESET} Audio: {b_label} vs {o_label}")
+
+        # Subtitles
+        best_subs = len(best.subtitle_tracks)
+        other_subs = len(other.subtitle_tracks)
+        if best_subs == 0 and other_subs > 0:
+            diffs.append(f"{_RED}-{_RESET} #1 has no subtitles, #{ranked.index(other)+1} has {other_subs}")
+        elif other_subs == 0 and best_subs > 0:
+            diffs.append(f"{_GREEN}+{_RESET} #1 has subtitles, #{ranked.index(other)+1} has none")
+
+        # Size
+        size_ratio = best.file_size / other.file_size if other.file_size else 0
+        if size_ratio > 1.3:
+            diffs.append(f"Size: #1 is {size_ratio:.1f}x larger ({best.file_size_human} vs {other.file_size_human})")
+        elif size_ratio < 0.7:
+            diffs.append(f"{_GREEN}+{_RESET} Size: #1 is {1/size_ratio:.1f}x smaller")
+
+    return diffs
 
 
 def export_json(files: list[VideoFile]) -> str:
