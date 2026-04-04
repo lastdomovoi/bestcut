@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
 from models import AudioTrack, SubtitleTrack, VideoFile, VideoTrack
+
+
+# Channels with RMS below this threshold are considered silent.
+SILENT_THRESHOLD_DB = -70.0
+
+# If two channels differ by less than this, they carry the same signal.
+IDENTICAL_THRESHOLD_DB = 1.0
 
 
 def _run_ffprobe(path: Path, *extra_args: str) -> dict:
@@ -126,6 +134,229 @@ def _detect_dtsx(stream: dict) -> bool:
         return True
 
     return False
+
+
+def detect_real_channels(path: Path, stream_index: int, channels: int,
+                         duration: float) -> int | None:
+    """Detect actual number of active audio channels via RMS analysis.
+
+    Samples 60 seconds from ~30% into the file to skip intros.
+    Returns the real channel count, or None if detection fails.
+    """
+    if channels <= 1:
+        return None  # Already mono, nothing to detect
+
+    # Sample from 30% into the file, 60 seconds
+    start = max(0, duration * 0.3)
+    sample_duration = min(60, duration - start)
+    if sample_duration < 5:
+        start = 0
+        sample_duration = min(60, duration)
+
+    cmd = [
+        "ffmpeg", "-v", "info",
+        "-ss", str(int(start)),
+        "-i", str(path),
+        "-t", str(int(sample_duration)),
+        "-map", f"0:a:{stream_index}",
+        "-af", "astats=metadata=1:reset=0",
+        "-f", "null", "-",
+    ]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+    stderr = result.stderr
+    # Parse per-channel RMS levels from the final astats output.
+    # astats prints "RMS level dB" per channel, then "Overall".
+    rms_pattern = re.compile(r"RMS level dB:\s*([-\d.]+|inf|-inf)")
+    all_rms = rms_pattern.findall(stderr)
+    if not all_rms:
+        return None
+
+    # Take the last (channels + 1) values: per-channel + overall
+    # We only need the per-channel values.
+    tail = all_rms[-(channels + 1):]
+    if len(tail) < channels + 1:
+        tail = all_rms[-channels:] if len(all_rms) >= channels else all_rms
+
+    ch_rms: list[float] = []
+    for val in tail[:channels]:
+        try:
+            db = float(val)
+        except ValueError:
+            db = -200.0
+        ch_rms.append(db)
+
+    if len(ch_rms) < channels:
+        return None
+
+    # Count active (non-silent) channels
+    active = [i for i, db in enumerate(ch_rms) if db > SILENT_THRESHOLD_DB]
+
+    if len(active) == 0:
+        return 1  # All silent — treat as mono
+
+    if len(active) == 1:
+        return 1  # Only one channel has signal — mono
+
+    if len(active) == 2:
+        # Check if two active channels carry the same signal (mono→stereo)
+        db_a, db_b = ch_rms[active[0]], ch_rms[active[1]]
+        if abs(db_a - db_b) < IDENTICAL_THRESHOLD_DB:
+            return 1  # Same signal in both — effectively mono
+        return 2  # True stereo
+
+    return len(active)
+
+
+def detect_crop_and_upscale(path: Path, vf: VideoFile) -> None:
+    """Detect black bars (letterboxing/pillarboxing) and upscale.
+
+    Sets vf.video.crop_width, crop_height (real content area),
+    vf.video.is_upscaled and vf.video.real_height.
+    """
+    height = vf.video.height
+    duration = vf.duration
+
+    # Sample from 40% into the file to avoid intros/credits
+    start = max(0, int(duration * 0.4))
+
+    # cropdetect — find actual content boundaries
+    cmd = [
+        "ffmpeg", "-v", "info",
+        "-ss", str(start),
+        "-i", str(path),
+        "-t", "10",
+        "-map", "0:v:0",
+        "-vf", "cropdetect=24:2:0",
+        "-f", "null", "-",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        crop_lines = re.findall(r"crop=(\d+):(\d+):\d+:\d+", result.stderr)
+        if crop_lines:
+            # Take last (most stable) crop value
+            crop_w, crop_h = int(crop_lines[-1][0]), int(crop_lines[-1][1])
+            vf.video.crop_width = crop_w
+            vf.video.crop_height = crop_h
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    # Upscale detection via BPP heuristic
+    if height <= 480:
+        return  # Nothing to detect for SD content
+
+    from scoring import bits_per_pixel, CODEC_EFFICIENCY
+    bpp = bits_per_pixel(vf)
+    if bpp > 0:
+        thresholds = {
+            2160: 0.015,
+            1440: 0.020,
+            1080: 0.025,
+            720: 0.035,
+        }
+        threshold = 0.025
+        for h, t in sorted(thresholds.items()):
+            if height >= h:
+                threshold = t
+        if bpp < threshold:
+            vf.video.is_upscaled = True
+            eff = CODEC_EFFICIENCY.get(vf.video.codec, 1.0)
+            eff_br = vf.video.bitrate * eff
+            fps = vf.video.fps or 25.0
+            target_bpp = 0.06
+            if eff_br > 0 and fps > 0:
+                real_pixels = eff_br / (fps * target_bpp)
+                aspect = vf.video.width / vf.video.height if vf.video.height else 16 / 9
+                real_h = int((real_pixels / aspect) ** 0.5)
+                for std in (2160, 1440, 1080, 720, 576, 480, 360):
+                    if real_h >= std * 0.85:
+                        vf.video.real_height = std
+                        break
+                else:
+                    vf.video.real_height = real_h
+
+
+def detect_3d(path: Path, vf: VideoFile) -> None:
+    """Detect 3D/stereoscopic video from metadata and stream info."""
+    # Check MVC codec (H.264 MVC for Blu-ray 3D)
+    if vf.video.codec in ("h264_mvc", "mvc"):
+        vf.video.is_3d = True
+        vf.video.stereo_mode = "mvc"
+        return
+
+    # Check stream side_data for stereo3d info (ffprobe)
+    cmd = [
+        "ffprobe", "-v", "quiet", "-print_format", "json",
+        "-select_streams", "v:0",
+        "-show_frames", "-read_intervals", "%+#1",
+        "-show_entries", "frame=side_data_list",
+        str(path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        data = json.loads(result.stdout)
+        for frame in data.get("frames", []):
+            for sd in frame.get("side_data_list", []):
+                sd_type = sd.get("side_data_type", "").lower()
+                if "stereo3d" in sd_type or "stereo 3d" in sd_type:
+                    vf.video.is_3d = True
+                    vf.video.stereo_mode = sd.get("type", "unknown")
+                    return
+    except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+        pass
+
+    # Check MKV tags for StereoMode
+    cmd = [
+        "ffprobe", "-v", "quiet", "-print_format", "json",
+        "-select_streams", "v:0",
+        "-show_entries", "stream_tags=stereo_mode",
+        str(path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        data = json.loads(result.stdout)
+        for stream in data.get("streams", []):
+            tags = stream.get("tags", {})
+            mode = tags.get("stereo_mode", "").strip()
+            if mode and mode != "mono":
+                vf.video.is_3d = True
+                stereo_modes = {
+                    "1": "side_by_side",
+                    "2": "top_bottom",
+                    "3": "top_bottom",
+                    "side_by_side_left": "side_by_side",
+                    "top_bottom": "top_bottom",
+                }
+                vf.video.stereo_mode = stereo_modes.get(mode, mode)
+                return
+    except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+        pass
+
+    # Check filename for 3D indicators
+    name = path.name.lower()
+    if any(tag in name for tag in ("3d", "sbs", "hsbs", "half-sbs",
+                                    "ou", "hou", "half-ou", "tab")):
+        vf.video.is_3d = True
+        if "sbs" in name or "half-sbs" in name or "hsbs" in name:
+            vf.video.stereo_mode = "side_by_side"
+        elif "ou" in name or "hou" in name or "tab" in name:
+            vf.video.stereo_mode = "top_bottom"
+        else:
+            vf.video.stereo_mode = "unknown"
+
+
+def detect_all_real_channels(path: Path, vf: VideoFile) -> None:
+    """Detect real channels for all audio tracks in a VideoFile."""
+    for i, at in enumerate(vf.audio_tracks):
+        if at.channels <= 1:
+            continue
+        dur = at.duration or vf.duration
+        at.real_channels = detect_real_channels(path, i, at.channels, dur)
 
 
 def probe_file(path: Path, use_cache: bool = True) -> VideoFile:

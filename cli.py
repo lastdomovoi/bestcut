@@ -26,7 +26,7 @@ from compatibility import check_compatibility, compatibility_score
 from episode_matcher import group_episodes, scan_directory
 from integrity import check_duration_sync, check_full, check_quick
 from models import VideoFile
-from probe import probe_file
+from probe import detect_3d, detect_all_real_channels, detect_crop_and_upscale, probe_file
 from profiles import ScoringWeights, get_profile, list_profiles, parse_custom_weights
 from scoring import calculate_score
 
@@ -36,9 +36,21 @@ def process_file(
     check_integrity: str = "none",
     verbose: bool = False,
     weights: ScoringWeights | None = None,
+    cfg: "Config | None" = None,
 ) -> VideoFile:
     """Process a single file: probe + integrity + compatibility + score."""
+    from config import Config
+    if cfg is None:
+        cfg = Config()
+
     vf = probe_file(path)
+
+    # Detect real audio channels (fake 5.1 detection)
+    detect_all_real_channels(path, vf)
+
+    # Detect crop/upscale and 3D
+    detect_crop_and_upscale(path, vf)
+    detect_3d(path, vf)
 
     # Integrity
     if check_integrity == "quick":
@@ -61,7 +73,14 @@ def process_file(
     vf.compatibility_issues = all_issues
 
     # Scoring
-    calculate_score(vf, weights)
+    calculate_score(
+        vf, weights,
+        primary_language=cfg.primary_language,
+        extra_languages=cfg.extra_languages,
+        missing_primary_penalty=cfg.missing_primary_penalty,
+        extra_primary_track_bonus=cfg.extra_primary_track_bonus,
+        extra_language_bonus=cfg.extra_language_bonus,
+    )
 
     return vf
 
@@ -82,8 +101,10 @@ def cmd_compare(args: argparse.Namespace) -> int:
         print(list_profiles())
         return 0
 
+    from config import Config
+    cfg = getattr(args, '_cfg', None) or Config()
     paths = [Path(p) for p in args.paths]
-    weights = _resolve_weights(args, getattr(args, '_cfg', None))
+    weights = _resolve_weights(args, cfg)
 
     # Collect all video files
     all_files: list[Path] = []
@@ -123,7 +144,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
         futures = {}
         with ThreadPoolExecutor(max_workers=workers) as pool:
             for fp in all_files:
-                fut = pool.submit(process_file, fp, check_mode, args.verbose, weights)
+                fut = pool.submit(process_file, fp, check_mode, args.verbose, weights, cfg)
                 futures[fut] = fp
 
             done = 0
@@ -143,7 +164,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
             log.write(f"  [{i}/{total}] {fp.name}...")
             log.flush()
             try:
-                vf = process_file(fp, check_integrity=check_mode, verbose=args.verbose, weights=weights)
+                vf = process_file(fp, check_integrity=check_mode, verbose=args.verbose, weights=weights, cfg=cfg)
                 video_files.append(vf)
                 log.write(f" {vf.score:.1f} points\n")
             except Exception as e:

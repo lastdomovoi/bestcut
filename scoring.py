@@ -58,9 +58,19 @@ def bits_per_pixel(vf: VideoFile) -> float:
 
 
 def score_resolution(vf: VideoFile) -> float:
-    """Resolution score (0-30 points). 4K = 30, 1080p ~ 7.5, 720p ~ 3.3."""
+    """Resolution score (0-30 points). 4K = 30, 1080p ~ 7.5, 720p ~ 3.3.
+
+    Upscaled video is scored by its estimated real resolution.
+    """
+    if vf.video.is_upscaled and vf.video.real_height:
+        # Use real resolution for scoring
+        aspect = vf.video.width / vf.video.height if vf.video.height else 16 / 9
+        real_w = int(vf.video.real_height * aspect)
+        real_pixels = real_w * vf.video.real_height
+    else:
+        real_pixels = vf.video.pixels
     ref_pixels = 3840 * 2160  # 4K
-    return min(30.0, (vf.video.pixels / ref_pixels) * 30.0)
+    return min(30.0, (real_pixels / ref_pixels) * 30.0)
 
 
 def score_video_quality(vf: VideoFile) -> float:
@@ -105,7 +115,7 @@ def _audio_track_rank(a) -> tuple:
     return (spatial, lossless, codec_rank, a.channels, a.bitrate)
 
 
-def score_audio(vf: VideoFile) -> float:
+def score_audio(vf: VideoFile, primary_language: str = "") -> float:
     """Audio score (0-25 points).
 
     Breakdown:
@@ -114,12 +124,23 @@ def score_audio(vf: VideoFile) -> float:
     - Channels (0-4): surround sound
     - Bitrate (0-4): stream sufficiency
     - Multi-language (0-3): multiple language tracks
+
+    When primary_language is set, the best track in that language is used
+    for quality scoring (spatial, codec, channels, bitrate).
     """
     if not vf.audio_tracks:
         return 0.0
 
-    # Best audio track
-    best = max(vf.audio_tracks, key=_audio_track_rank)
+    # Best audio track — prefer primary language if configured
+    if primary_language:
+        primary_tracks = [at for at in vf.audio_tracks
+                          if at.language == primary_language]
+        if primary_tracks:
+            best = max(primary_tracks, key=_audio_track_rank)
+        else:
+            best = max(vf.audio_tracks, key=_audio_track_rank)
+    else:
+        best = max(vf.audio_tracks, key=_audio_track_rank)
 
     # Spatial audio (0-8)
     if best.has_atmos:
@@ -139,10 +160,12 @@ def score_audio(vf: VideoFile) -> float:
     codec_score = min(6.0, codec_score)
 
     # Channels (-3 to 4): 7.1=4, 5.1=3, stereo=1, mono=-3 (penalty)
-    if best.channels <= 1:
+    # Use effective_channels (real detected channels, not metadata)
+    eff_ch = best.effective_channels
+    if eff_ch <= 1:
         channel_score = -3.0  # mono is a significant downgrade
     else:
-        channel_score = min(4.0, (best.channels / 8) * 4.0)
+        channel_score = min(4.0, (eff_ch / 8) * 4.0)
 
     # Bitrate (0-4)
     if best.bitrate > 0:
@@ -185,7 +208,48 @@ def score_integrity(vf: VideoFile) -> float:
     return -penalty
 
 
-def calculate_score(vf: VideoFile, weights: ScoringWeights | None = None) -> float:
+def score_language_tracks(vf: VideoFile,
+                         primary_language: str = "",
+                         extra_languages: list[str] | None = None,
+                         missing_primary_penalty: float = 10.0,
+                         extra_primary_track_bonus: float = 1.5,
+                         extra_language_bonus: float = 1.5) -> float:
+    """Score based on audio language availability.
+
+    - Penalty if primary language is absent.
+    - Bonus for multiple tracks in primary language (dubs, commentary).
+    - Bonus for each extra language present.
+    """
+    if not primary_language:
+        return 0.0
+
+    score = 0.0
+    primary_tracks = [at for at in vf.audio_tracks
+                      if at.language == primary_language]
+
+    if not primary_tracks:
+        score -= missing_primary_penalty
+    else:
+        # Bonus for extra primary-language tracks (beyond the first)
+        extra_count = len(primary_tracks) - 1
+        if extra_count > 0:
+            score += min(3.0, extra_count * extra_primary_track_bonus)
+
+    # Bonus for extra languages
+    if extra_languages:
+        available = {at.language for at in vf.audio_tracks if at.language}
+        present = sum(1 for lang in extra_languages if lang in available)
+        score += min(3.0, present * extra_language_bonus)
+
+    return score
+
+
+def calculate_score(vf: VideoFile, weights: ScoringWeights | None = None,
+                    primary_language: str = "",
+                    extra_languages: list[str] | None = None,
+                    missing_primary_penalty: float = 10.0,
+                    extra_primary_track_bonus: float = 1.5,
+                    extra_language_bonus: float = 1.5) -> float:
     """Calculate overall video file quality score.
 
     Weights — multipliers for each component.
@@ -198,7 +262,7 @@ def calculate_score(vf: VideoFile, weights: ScoringWeights | None = None) -> flo
         "resolution": score_resolution(vf) * weights.resolution,
         "video_quality": score_video_quality(vf) * weights.video_quality,
         "hdr": score_hdr(vf) * weights.hdr,
-        "audio": score_audio(vf) * weights.audio,
+        "audio": score_audio(vf, primary_language) * weights.audio,
         "subtitles": score_subtitles(vf) * weights.subtitles,
         "compatibility": vf.compatibility_score * weights.compatibility,
         "integrity": score_integrity(vf),  # penalties are not scaled
@@ -210,12 +274,27 @@ def calculate_score(vf: VideoFile, weights: ScoringWeights | None = None) -> flo
         size_penalty = min(15.0, (vf.file_size_gb / 50.0) * 15.0) * weights.file_size
         components["file_size_penalty"] = -size_penalty
 
+    # Language track scoring
+    if primary_language:
+        lang_score = score_language_tracks(
+            vf, primary_language, extra_languages,
+            missing_primary_penalty, extra_primary_track_bonus,
+            extra_language_bonus,
+        )
+        if lang_score != 0:
+            components["language_tracks"] = lang_score
+
     total = sum(components.values())
     vf.score = max(0.0, total)
     return vf.score
 
 
-def score_breakdown(vf: VideoFile, weights: ScoringWeights | None = None) -> dict[str, float]:
+def score_breakdown(vf: VideoFile, weights: ScoringWeights | None = None,
+                    primary_language: str = "",
+                    extra_languages: list[str] | None = None,
+                    missing_primary_penalty: float = 10.0,
+                    extra_primary_track_bonus: float = 1.5,
+                    extra_language_bonus: float = 1.5) -> dict[str, float]:
     """Return score breakdown by component (with weights applied)."""
     if weights is None:
         weights = ScoringWeights()
@@ -224,7 +303,7 @@ def score_breakdown(vf: VideoFile, weights: ScoringWeights | None = None) -> dic
         f"Resolution (x{weights.resolution})": score_resolution(vf) * weights.resolution,
         f"Video quality (x{weights.video_quality})": score_video_quality(vf) * weights.video_quality,
         f"HDR (x{weights.hdr})": score_hdr(vf) * weights.hdr,
-        f"Audio (x{weights.audio})": score_audio(vf) * weights.audio,
+        f"Audio (x{weights.audio})": score_audio(vf, primary_language) * weights.audio,
         f"Subtitles (x{weights.subtitles})": score_subtitles(vf) * weights.subtitles,
         f"Compatibility (x{weights.compatibility})": vf.compatibility_score * weights.compatibility,
         "Integrity": score_integrity(vf),
@@ -233,5 +312,16 @@ def score_breakdown(vf: VideoFile, weights: ScoringWeights | None = None) -> dic
     if weights.file_size > 0 and vf.file_size_gb > 0:
         size_penalty = min(15.0, (vf.file_size_gb / 50.0) * 15.0) * weights.file_size
         result[f"File size penalty (x{weights.file_size})"] = -size_penalty
+
+    if primary_language:
+        lang_score = score_language_tracks(
+            vf, primary_language, extra_languages,
+            missing_primary_penalty, extra_primary_track_bonus,
+            extra_language_bonus,
+        )
+        primary_count = sum(1 for at in vf.audio_tracks
+                            if at.language == primary_language)
+        label = f"Language ({primary_language}: {primary_count} tracks)"
+        result[label] = lang_score
 
     return result

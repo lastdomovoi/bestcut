@@ -181,13 +181,12 @@ def _render_table(headers: list[str], rows: list[list[str]], highlight_row: int 
 
 
 def _audio_summary(vf: VideoFile) -> str:
-    """Short audio summary for table cell."""
+    """Short audio summary for table cell (best track only)."""
     if not vf.audio_tracks:
         return "-"
     best = vf.audio_tracks[0]
-    # Find best by channels
     for at in vf.audio_tracks:
-        if at.channels > best.channels:
+        if at.effective_channels > best.effective_channels:
             best = at
     parts = [best.format_label, best.channel_label]
     if best.spatial_format:
@@ -195,6 +194,25 @@ def _audio_summary(vf: VideoFile) -> str:
     elif best.is_lossless:
         parts.append("lossless")
     return " ".join(parts)
+
+
+def _audio_tracks_detail(vf: VideoFile) -> list[str]:
+    """List of all audio tracks as formatted strings."""
+    lines = []
+    for i, at in enumerate(vf.audio_tracks):
+        br_kbps = at.bitrate / 1000 if at.bitrate else 0
+        lang = at.language or "?"
+        parts = [f"{at.format_label} {at.channel_label}"]
+        parts.append(f"{br_kbps:.0f}k")
+        parts.append(lang)
+        if at.spatial_format:
+            parts.append(at.spatial_format)
+        elif at.is_lossless:
+            parts.append("lossless")
+        if at.title:
+            parts.append(f"«{at.title}»")
+        lines.append(" ".join(parts))
+    return lines
 
 
 def _subs_summary(vf: VideoFile) -> str:
@@ -256,11 +274,41 @@ def format_group_comparison(
             ["Bitrate", *[f"{v_br(vf)} Mbps" for vf in ranked]],
             ["FPS", *[f"{vf.video.fps:.0f}" for vf in ranked]],
             ["HDR", *[vf.video.hdr_type.upper() if vf.video.hdr_type else "-" for vf in ranked]],
-            ["Audio", *[_audio_summary(vf) for vf in ranked]],
-            ["Subtitles", *[_subs_summary(vf) for vf in ranked]],
-            ["Compat issues", *[str(len(vf.compatibility_issues)) for vf in ranked]],
-            ["", *["" for _ in ranked]],
+            ["Aspect", *[
+                f"{vf.video.real_aspect_ratio}"
+                + (f" (encoded {vf.video.encoded_aspect_ratio})" if vf.video.has_black_bars else "")
+                for vf in ranked
+            ]],
+            ["Black bars", *[
+                f"YES ({vf.video.crop_width}x{vf.video.crop_height} of {vf.video.width}x{vf.video.height})"
+                if vf.video.has_black_bars else "-"
+                for vf in ranked
+            ]],
+            ["3D", *[f"{vf.video.stereo_mode}" if vf.video.is_3d else "-" for vf in ranked]],
+            ["Upscale", *[
+                f"YES (real ~{vf.video.real_height}p)" if vf.video.is_upscaled and vf.video.real_height
+                else ("YES" if vf.video.is_upscaled else "-")
+                for vf in ranked
+            ]],
         ]
+        # All audio tracks
+        max_audio = max(len(vf.audio_tracks) for vf in ranked) if ranked else 0
+        for ai in range(max_audio):
+            label = f"Audio #{ai + 1}"
+            cells = []
+            for vf in ranked:
+                if ai < len(vf.audio_tracks):
+                    at = vf.audio_tracks[ai]
+                    tracks = _audio_tracks_detail(vf)
+                    cells.append(tracks[ai])
+                else:
+                    cells.append("-")
+            rows.append([label, *cells])
+
+        rows.append(["Subtitles", *[_subs_summary(vf) for vf in ranked]])
+        rows.append(["Compat issues", *[str(len(vf.compatibility_issues)) for vf in ranked]])
+        rows.append(["", *["" for _ in ranked]])
+
         # Score breakdown
         for key in bd_keys:
             label = key.split("(")[0].strip()
@@ -277,9 +325,20 @@ def format_group_comparison(
             ["FPS", *[f"{vf.video.fps:.0f}" for vf in ranked]],
             ["Audio", *[_audio_summary(vf) for vf in ranked]],
             ["Subtitles", *[_subs_summary(vf) for vf in ranked]],
+        ]
+        # Show upscale/3D only if detected in any file
+        if any(vf.video.is_upscaled for vf in ranked):
+            rows.append(["Upscale", *[
+                f"YES (~{vf.video.real_height}p)" if vf.video.is_upscaled and vf.video.real_height
+                else ("-" if not vf.video.is_upscaled else "YES")
+                for vf in ranked
+            ]])
+        if any(vf.video.is_3d for vf in ranked):
+            rows.append(["3D", *[vf.video.stereo_mode if vf.video.is_3d else "-" for vf in ranked]])
+        rows.extend([
             ["Compat issues", *[str(len(vf.compatibility_issues)) for vf in ranked]],
             ["TOTAL", *[f"{vf.score:.1f} pts" for vf in ranked]],
-        ]
+        ])
 
     lines.append(_render_table(headers, rows))
 
@@ -290,6 +349,27 @@ def format_group_comparison(
         lines.append(f"  Result: roughly equal (difference {diff:.1f})")
     else:
         lines.append(f"  Recommendation: {best.path.name} (+{diff:.1f} pts)")
+
+    # Duration difference warning
+    if len(ranked) >= 2:
+        durations = [vf.duration for vf in ranked if vf.duration > 0]
+        if len(durations) >= 2:
+            max_dur = max(durations)
+            min_dur = min(durations)
+            diff_sec = max_dur - min_dur
+            if diff_sec > 10:
+                diff_m, diff_s = divmod(int(diff_sec), 60)
+                pct = (diff_sec / max_dur) * 100
+                longest = [vf for vf in ranked if vf.duration == max_dur][0]
+                shortest = [vf for vf in ranked if vf.duration == min_dur][0]
+                if diff_sec > 300:
+                    lines.append(
+                        f"  !! Duration differs by {diff_m}m{diff_s:02d}s ({pct:.1f}%) — "
+                        f"likely different edit/version"
+                    )
+                else:
+                    lines.append(
+                        f"  ~ Duration differs by {diff_m}m{diff_s:02d}s ({pct:.1f}%)")
 
     return "\n".join(lines)
 

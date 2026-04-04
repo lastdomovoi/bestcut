@@ -21,7 +21,53 @@ class VideoTrack:
     color_transfer: str = ""
     color_primaries: str = ""
     hdr_type: str = ""  # "", "hdr10", "hdr10+", "dolby_vision", "hlg"
+    is_3d: bool = False
+    stereo_mode: str = ""  # "side_by_side", "top_bottom", "frame_sequential", etc.
+    is_upscaled: bool = False
+    real_height: int | None = None  # Estimated real resolution if upscaled
+    crop_width: int | None = None   # Actual content width (without black bars)
+    crop_height: int | None = None  # Actual content height (without black bars)
     duration: float = 0.0
+
+    @property
+    def has_black_bars(self) -> bool:
+        if self.crop_width is None or self.crop_height is None:
+            return False
+        return (self.crop_width < self.width * 0.97 or
+                self.crop_height < self.height * 0.97)
+
+    @property
+    def real_aspect_ratio(self) -> str:
+        """Real aspect ratio of content (without black bars)."""
+        w = self.crop_width or self.width
+        h = self.crop_height or self.height
+        if h == 0:
+            return "?"
+        ratio = w / h
+        # Match to common aspect ratios
+        aspects = [
+            (4 / 3, "4:3"), (16 / 9, "16:9"), (1.85, "1.85:1"),
+            (2.35, "2.35:1"), (2.39, "2.39:1"), (2.40, "2.40:1"),
+            (21 / 9, "21:9"), (1.33, "4:3"), (1.78, "16:9"),
+        ]
+        closest = min(aspects, key=lambda x: abs(x[0] - ratio))
+        if abs(closest[0] - ratio) < 0.05:
+            return closest[1]
+        return f"{ratio:.2f}:1"
+
+    @property
+    def encoded_aspect_ratio(self) -> str:
+        if self.height == 0:
+            return "?"
+        ratio = self.width / self.height
+        aspects = [
+            (4 / 3, "4:3"), (16 / 9, "16:9"), (1.85, "1.85:1"),
+            (2.35, "2.35:1"), (2.39, "2.39:1"), (2.40, "2.40:1"),
+        ]
+        closest = min(aspects, key=lambda x: abs(x[0] - ratio))
+        if abs(closest[0] - ratio) < 0.05:
+            return closest[1]
+        return f"{ratio:.2f}:1"
 
     @property
     def pixels(self) -> int:
@@ -58,6 +104,7 @@ class AudioTrack:
     has_atmos: bool = False  # Dolby Atmos (TrueHD Atmos / EAC3 JOC)
     has_dtsx: bool = False   # DTS:X
     is_lossless: bool = False  # TrueHD, DTS-HD MA, FLAC, PCM
+    real_channels: int | None = None  # Actual active channels (detected via RMS analysis)
 
     @property
     def spatial_format(self) -> str:
@@ -96,12 +143,29 @@ class AudioTrack:
         return base
 
     @property
+    def effective_channels(self) -> int:
+        """Actual channel count for scoring (real_channels if detected)."""
+        if self.real_channels is not None:
+            return self.real_channels
+        return self.channels
+
+    @property
     def channel_label(self) -> str:
-        if self.channels >= 8:
+        ch = self.channels
+        real = self.real_channels
+        label = self._ch_label(ch)
+        if real is not None and real < ch:
+            real_label = self._ch_label(real)
+            return f"{label} (fake, real: {real_label})"
+        return label
+
+    @staticmethod
+    def _ch_label(ch: int) -> str:
+        if ch >= 8:
             return "7.1"
-        if self.channels >= 6:
+        if ch >= 6:
             return "5.1"
-        if self.channels >= 2:
+        if ch >= 2:
             return "Stereo"
         return "Mono"
 
