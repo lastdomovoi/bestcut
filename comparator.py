@@ -302,6 +302,8 @@ def _audio_summary(vf: VideoFile) -> str:
         parts.append(best.spatial_format)
     elif best.is_lossless:
         parts.append("lossless")
+    if best.language:
+        parts.append(best.language)
     return " ".join(parts)
 
 
