@@ -78,14 +78,21 @@ def normalize_title(filename: str) -> str:
     noise = [
         r'\b(19|20)\d{2}\b',  # year (1900-2099)
         r'\b\d{3,4}[pi]\b',   # 1080p, 1080i, 720p, etc.
-        r'\bbluray\b', r'\bbdrip\b', r'\bwebrip\b',
+        r'\bbluray\b', r'\bbdrip\b', r'\bwebrip\b', r'\bbdremux\b',
         r'\bweb-?dl\b', r'\bhdtv\b', r'\bx26[45]\b', r'\bh\.?26[45]\b',
         r'\baac\b', r'\bflac\b', r'\bdts\b', r'\b10bit\b',
-        r'\bhdr\b', r'\bremux\b', r'\bdvdrip\b',
+        r'\bhdr\b', r'\bremux\b', r'\bdvdrip\b', r'\bhdrip\b',
+        r'\bсуб\b', r'\bсерия\b', r'\bсерии\b', r'\bчасть\b',
+        r'\b\d+\s*серия\b', r'\b\d+\s*часть\b',
+        r'\bили\b',  # "или" in extended titles
     ]
     for n in noise:
         name = re.sub(n, '', name, flags=re.IGNORECASE)
 
+    # Remove punctuation leftovers
+    name = re.sub(r'[,!?;:]+', ' ', name)
+    # Remove trailing standalone numbers (episode/part leftovers)
+    name = re.sub(r'\s+\d{1,2}\s*$', '', name)
     return re.sub(r'\s+', ' ', name).strip()
 
 
@@ -137,14 +144,41 @@ def group_episodes(files: list[VideoFile]) -> dict[str, dict[tuple[int | None, i
     return _merge_by_episode(dict(groups))
 
 
+def _titles_similar(t1: str, t2: str) -> bool:
+    """Check if two normalized titles refer to the same content.
+
+    Uses prefix/substring matching and word overlap.
+    """
+    if not t1 or not t2:
+        return False
+    # Exact match
+    if t1 == t2:
+        return True
+    # One is a prefix of the other (with at least 4 chars)
+    shorter, longer = (t1, t2) if len(t1) <= len(t2) else (t2, t1)
+    if len(shorter) >= 4 and longer.startswith(shorter):
+        return True
+    # Word overlap: if the shorter title's words are all in the longer
+    w1 = set(shorter.split())
+    w2 = set(longer.split())
+    if len(w1) >= 2 and w1.issubset(w2):
+        return True
+    # High word overlap ratio (>= 60% of the shorter set)
+    if w1 and w2:
+        overlap = w1 & w2
+        if len(overlap) >= max(2, len(min(w1, w2, key=len)) * 0.6):
+            return True
+    return False
+
+
 def _merge_by_episode(
     groups: dict[str, dict[tuple[int | None, int | None], list[VideoFile]]],
 ) -> dict[str, dict[tuple[int | None, int | None], list[VideoFile]]]:
-    """Merge groups with different titles but identical episode sets.
+    """Merge groups with different titles but same content.
 
-    If two groups have the exact same set of (season, episode) keys and
-    all episodes are singletons (one file per episode per group), they
-    likely represent different releases of the same content.
+    Merges when:
+    1. Episode key sets match or overlap significantly, OR
+    2. Titles are similar (prefix/substring/word overlap) — for standalone movies
     """
     titles = list(groups.keys())
     if len(titles) < 2:
@@ -158,43 +192,47 @@ def _merge_by_episode(
             continue
 
         ep_keys_1 = set(groups[t1].keys())
-        # Skip groups without episode numbers (standalone movies)
-        if ep_keys_1 == {(None, None)}:
-            merged[t1] = groups[t1]
-            used.add(t1)
-            continue
+        is_standalone_1 = ep_keys_1 == {(None, None)}
 
-        # Look for a matching group with same episode keys
-        best_match = None
+        # Look for matching groups
+        matches: list[str] = []
         for j in range(i + 1, len(titles)):
             t2 = titles[j]
             if t2 in used:
                 continue
             ep_keys_2 = set(groups[t2].keys())
-            if ep_keys_2 == {(None, None)}:
-                continue
-            # Same episode key set — likely same content
-            if ep_keys_1 == ep_keys_2:
-                best_match = t2
-                break
-            # Overlapping episode keys — also merge
-            overlap = ep_keys_1 & ep_keys_2
-            if overlap and len(overlap) >= min(len(ep_keys_1), len(ep_keys_2)) * 0.5:
-                best_match = t2
-                break
+            is_standalone_2 = ep_keys_2 == {(None, None)}
 
-        if best_match:
-            # Merge into t1
+            should_merge = False
+
+            # Both have episodes — check episode overlap
+            if not is_standalone_1 and not is_standalone_2:
+                if ep_keys_1 == ep_keys_2:
+                    should_merge = True
+                else:
+                    overlap = ep_keys_1 & ep_keys_2
+                    if overlap and len(overlap) >= min(len(ep_keys_1), len(ep_keys_2)) * 0.5:
+                        should_merge = True
+
+            # Title similarity — works for both standalone and episodic
+            if not should_merge and _titles_similar(t1, t2):
+                should_merge = True
+
+            if should_merge:
+                matches.append(t2)
+
+        if matches:
+            # Merge all matches into t1
             combined = defaultdict(list)
             for ep_key, vf_list in groups[t1].items():
                 combined[ep_key].extend(vf_list)
-            for ep_key, vf_list in groups[best_match].items():
-                combined[ep_key].extend(vf_list)
+            for t2 in matches:
+                for ep_key, vf_list in groups[t2].items():
+                    combined[ep_key].extend(vf_list)
+                used.add(t2)
             merged[t1] = dict(combined)
-            used.add(t1)
-            used.add(best_match)
         else:
             merged[t1] = groups[t1]
-            used.add(t1)
+        used.add(t1)
 
     return merged
