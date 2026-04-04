@@ -202,8 +202,11 @@ def _audio_tracks_detail(vf: VideoFile) -> list[str]:
     for i, at in enumerate(vf.audio_tracks):
         br_kbps = at.bitrate / 1000 if at.bitrate else 0
         lang = at.language or "?"
+        sr = f"{at.sample_rate // 1000}kHz" if at.sample_rate else ""
         parts = [f"{at.format_label} {at.channel_label}"]
         parts.append(f"{br_kbps:.0f}k")
+        if sr:
+            parts.append(sr)
         parts.append(lang)
         if at.spatial_format:
             parts.append(at.spatial_format)
@@ -234,6 +237,7 @@ def format_group_comparison(
     files: list[VideoFile],
     verbose: bool = False,
     weights: ScoringWeights | None = None,
+    cfg=None,
 ) -> str:
     """Format comparison of a file group (one episode, multiple versions)."""
     lines = []
@@ -262,17 +266,42 @@ def format_group_comparison(
     v_br = lambda vf: f"{vf.video.bitrate / 1_000_000:.1f}" if vf.video.bitrate else "?"
 
     if verbose:
-        bd = [score_breakdown(vf, weights) for vf in ranked]
-        bd_keys = list(bd[0].keys())
+        _lang_kw = {}
+        if cfg and cfg.primary_language:
+            _lang_kw = {
+                "primary_language": cfg.primary_language,
+                "extra_languages": cfg.extra_languages,
+                "missing_primary_penalty": cfg.missing_primary_penalty,
+                "extra_primary_track_bonus": cfg.extra_primary_track_bonus,
+                "extra_language_bonus": cfg.extra_language_bonus,
+            }
+        bd = [score_breakdown(vf, weights, **_lang_kw) for vf in ranked]
+        # Merge all keys preserving order
+        bd_keys = []
+        seen = set()
+        for d in bd:
+            for k in d:
+                if k not in seen:
+                    bd_keys.append(k)
+                    seen.add(k)
 
         headers = ["", "#1 ★ BEST", *[f"#{i+2}" for i in range(len(ranked)-1)]]
+        _bpp = lambda vf: f"{bits_per_pixel(vf):.4f}" if bits_per_pixel(vf) > 0 else "?"
         rows = [
             ["File", *[vf.path.name for vf in ranked]],
+            ["Source", *[vf.source_type or "-" for vf in ranked]],
+            ["Container", *[vf.container.split(",")[0] for vf in ranked]],
             ["Size", *[vf.file_size_human for vf in ranked]],
             ["Duration", *[vf.duration_human for vf in ranked]],
-            ["Video", *[f"{vf.video.codec.upper()} {vf.video.resolution_label}" for vf in ranked]],
+            ["Video", *[f"{vf.video.codec.upper()} {vf.video.profile} L{vf.video.level}" if vf.video.profile else f"{vf.video.codec.upper()}" for vf in ranked]],
+            ["Encoder", *[vf.video.encoder or "-" for vf in ranked]],
+            ["Resolution", *[f"{vf.video.width}x{vf.video.height} ({vf.video.resolution_label})" for vf in ranked]],
             ["Bitrate", *[f"{v_br(vf)} Mbps" for vf in ranked]],
-            ["FPS", *[f"{vf.video.fps:.0f}" for vf in ranked]],
+            ["BPP", *[_bpp(vf) for vf in ranked]],
+            ["FPS", *[f"{vf.video.fps:.2f}" for vf in ranked]],
+            ["Bit depth", *[f"{vf.video.bit_depth}-bit" for vf in ranked]],
+            ["Color space", *[vf.video.color_space or "-" for vf in ranked]],
+            ["Color transfer", *[vf.video.color_transfer or "-" for vf in ranked]],
             ["HDR", *[vf.video.hdr_type.upper() if vf.video.hdr_type else "-" for vf in ranked]],
             ["Aspect", *[
                 f"{vf.video.real_aspect_ratio}"
@@ -305,6 +334,14 @@ def format_group_comparison(
                     cells.append("-")
             rows.append([label, *cells])
 
+        # Audio summary
+        if cfg and cfg.primary_language:
+            lang = cfg.primary_language
+            rows.append([f"Audio ({lang})", *[
+                f"{sum(1 for at in vf.audio_tracks if at.language == lang)} tracks"
+                for vf in ranked
+            ]])
+        rows.append(["Audio total", *[f"{len(vf.audio_tracks)} tracks" for vf in ranked]])
         rows.append(["Subtitles", *[_subs_summary(vf) for vf in ranked]])
         rows.append(["Compat issues", *[str(len(vf.compatibility_issues)) for vf in ranked]])
         rows.append(["", *["" for _ in ranked]])
@@ -312,7 +349,7 @@ def format_group_comparison(
         # Score breakdown
         for key in bd_keys:
             label = key.split("(")[0].strip()
-            rows.append([label, *[f"{d[key]:.1f}" for d in bd]])
+            rows.append([label, *[f"{d.get(key, 0.0):.1f}" for d in bd]])
 
         rows.append(["", *["" for _ in ranked]])
         rows.append(["TOTAL", *[f"{vf.score:.1f}" for vf in ranked]])

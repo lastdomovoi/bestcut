@@ -21,6 +21,7 @@ class VideoTrack:
     color_transfer: str = ""
     color_primaries: str = ""
     hdr_type: str = ""  # "", "hdr10", "hdr10+", "dolby_vision", "hlg"
+    encoder: str = ""   # e.g. "x264", "x265", "rav1e", "libvpx"
     is_3d: bool = False
     stereo_mode: str = ""  # "side_by_side", "top_bottom", "frame_sequential", etc.
     is_upscaled: bool = False
@@ -210,6 +211,7 @@ class VideoFile:
     score: float = 0.0
     compatibility_score: float = 0.0
     compatibility_issues: list[str] = field(default_factory=list)
+    source_type: str = ""  # "BDRip", "WEB-DL", "HDTV", "DVDRip", etc.
     # For episode matching
     series_title: str = ""
     season: int | None = None

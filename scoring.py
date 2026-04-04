@@ -319,9 +319,6 @@ def score_breakdown(vf: VideoFile, weights: ScoringWeights | None = None,
             missing_primary_penalty, extra_primary_track_bonus,
             extra_language_bonus,
         )
-        primary_count = sum(1 for at in vf.audio_tracks
-                            if at.language == primary_language)
-        label = f"Language ({primary_language}: {primary_count} tracks)"
-        result[label] = lang_score
+        result["Language tracks"] = lang_score
 
     return result

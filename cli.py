@@ -26,7 +26,8 @@ from compatibility import check_compatibility, compatibility_score
 from episode_matcher import group_episodes, scan_directory
 from integrity import check_duration_sync, check_full, check_quick
 from models import VideoFile
-from probe import detect_3d, detect_all_real_channels, detect_crop_and_upscale, probe_file
+from probe import (detect_3d, detect_all_real_channels, detect_crop_and_upscale,
+                    detect_source_type, probe_file)
 from profiles import ScoringWeights, get_profile, list_profiles, parse_custom_weights
 from scoring import calculate_score
 
@@ -48,9 +49,10 @@ def process_file(
     # Detect real audio channels (fake 5.1 detection)
     detect_all_real_channels(path, vf)
 
-    # Detect crop/upscale and 3D
+    # Detect crop/upscale, 3D, source type
     detect_crop_and_upscale(path, vf)
     detect_3d(path, vf)
+    detect_source_type(path, vf)
 
     # Integrity
     if check_integrity == "quick":
@@ -207,7 +209,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
                 continue
 
             # Groups or verbose — full comparison
-            print(format_group_comparison(title, ep_key, files, verbose=args.verbose, weights=weights))
+            print(format_group_comparison(title, ep_key, files, verbose=args.verbose, weights=weights, cfg=cfg))
 
     # Overall summary for series
     has_comparisons = any(

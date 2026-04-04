@@ -350,6 +350,50 @@ def detect_3d(path: Path, vf: VideoFile) -> None:
             vf.video.stereo_mode = "unknown"
 
 
+def detect_source_type(path: Path, vf: VideoFile) -> None:
+    """Parse source type from filename (informational only, not scored)."""
+    name = path.name.upper()
+    # Ordered by specificity — first match wins
+    sources = [
+        ("REMUX", "Remux"),
+        ("BDREMUX", "Remux"),
+        ("BD-REMUX", "Remux"),
+        ("BDRIP", "BDRip"),
+        ("BD-RIP", "BDRip"),
+        ("BRRIP", "BDRip"),
+        ("BLURAY", "BluRay"),
+        ("BLU-RAY", "BluRay"),
+        ("WEB-DL", "WEB-DL"),
+        ("WEBDL", "WEB-DL"),
+        ("WEBRIP", "WEBRip"),
+        ("WEB-RIP", "WEBRip"),
+        ("WEB", "WEB"),
+        ("HDTV", "HDTV"),
+        ("PDTV", "PDTV"),
+        ("DVDRIP", "DVDRip"),
+        ("DVD-RIP", "DVDRip"),
+        ("DVD5", "DVD"),
+        ("DVD9", "DVD"),
+        ("DVDSCR", "DVDScr"),
+        ("HDRIP", "HDRip"),
+        ("HD-RIP", "HDRip"),
+        ("TELECINE", "TC"),
+        ("TELESYNC", "TS"),
+        ("CAMRIP", "CAMRip"),
+        ("SATRIP", "SatRip"),
+        ("TVRIP", "TVRip"),
+        ("IPTVRIP", "IPTVRip"),
+        ("LASERDISC", "LaserDisc"),
+        ("LDREMUX", "LaserDisc"),
+        ("VHS", "VHS"),
+        ("VHSRIP", "VHSRip"),
+    ]
+    for tag, label in sources:
+        if tag in name:
+            vf.source_type = label
+            return
+
+
 def detect_all_real_channels(path: Path, vf: VideoFile) -> None:
     """Detect real channels for all audio tracks in a VideoFile."""
     for i, at in enumerate(vf.audio_tracks):
@@ -412,6 +456,11 @@ def probe_file(path: Path, use_cache: bool = True) -> VideoFile:
         level = s.get("level", "")
         if isinstance(level, int) and level > 0:
             level = str(level / 10) if level > 9 else str(level)
+        # Extract encoder from stream or format tags
+        tags = s.get("tags", {})
+        encoder = (tags.get("encoder", "") or tags.get("ENCODER", "")
+                   or fmt.get("tags", {}).get("encoder", "")).strip()
+
         vf.video = VideoTrack(
             codec=s.get("codec_name", ""),
             profile=s.get("profile", ""),
@@ -426,6 +475,7 @@ def probe_file(path: Path, use_cache: bool = True) -> VideoFile:
             color_transfer=s.get("color_transfer", ""),
             color_primaries=s.get("color_primaries", ""),
             hdr_type=_detect_hdr(s, frames_data),
+            encoder=encoder,
             duration=float(s.get("duration", 0) or 0),
         )
         # If video bitrate is missing — estimate from overall
