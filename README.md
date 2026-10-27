@@ -9,7 +9,10 @@ CLI tool for comparing video files by quality, size and device compatibility. He
 - **Size efficiency scoring** — penalizes bloated encodes where extra size doesn't translate to real quality improvement (logarithmic diminishing returns on BPP)
 - **Upscale detection** — identifies video upscaled from lower resolution via BPP heuristics
 - **Black bars / aspect ratio** — detects letterboxing/pillarboxing, shows real content area and aspect ratio
-- **3D video detection** — MVC codec, stereo3d metadata, MKV stereo mode tags, filename patterns
+- **3D video** — MVC, stereo3d metadata, MKV stereo mode, filename tokens; scored per eye (SBS/top-bottom halve the frame), small bonus MVC > full > half
+- **Audio quality analysis** — noise floor in pauses, clipping, band-limited lossless (`analyze_quality` in config)
+- **Master-grade detection** — inferred from the content itself (never names/tags): native detail (not an upscale) plus HDR10 whose highlights really use the HDR range; heuristic bonus
+- **Real encoder detection** — x264/x265 from the bitstream, not the muxer (libmatroska)
 - **Dolby Atmos / DTS:X detection** — spatial audio formats are prioritized in scoring
 - **Lossless audio detection** — TrueHD, DTS-HD MA, FLAC, PCM
 - **Primary language scoring** — configurable primary language (e.g. `rus`) with penalty for absence, bonus for multiple tracks

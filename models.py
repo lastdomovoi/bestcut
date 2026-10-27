@@ -29,6 +29,10 @@ class VideoTrack:
     crop_width: int | None = None   # Actual content width (without black bars)
     crop_height: int | None = None  # Actual content height (without black bars)
     duration: float = 0.0
+    # Picture measurements (None = not measured)
+    detail_psnr: float | None = None  # PSNR vs. half-res round trip; high = no fine detail
+    peak_luma: float | None = None    # Median frame peak luma, fraction of code range
+    picture_measured: bool = False    # measurement attempted (also set on failure)
 
     @property
     def has_black_bars(self) -> bool:
@@ -75,6 +79,50 @@ class VideoTrack:
         return self.width * self.height
 
     @property
+    def stereo_divisor(self) -> int:
+        """How many views are packed into one frame (2 for SBS/top-bottom)."""
+        if self.is_3d and self.stereo_mode in ("side_by_side", "top_bottom"):
+            return 2
+        return 1
+
+    @property
+    def eye_width(self) -> int:
+        if self.is_3d and self.stereo_mode == "side_by_side":
+            return self.width // 2
+        return self.width
+
+    @property
+    def eye_height(self) -> int:
+        if self.is_3d and self.stereo_mode == "top_bottom":
+            return self.height // 2
+        return self.height
+
+    @property
+    def eye_pixels(self) -> int:
+        """Effective pixels per eye (SBS/TAB halve the frame)."""
+        return self.eye_width * self.eye_height
+
+    @property
+    def stereo_full_res(self) -> bool:
+        """True if each eye keeps full resolution (MVC, full SBS/TAB).
+
+        Half-SBS/half-TAB squeeze one axis, so the per-eye aspect ratio
+        is far from the real picture aspect.
+        """
+        if not self.is_3d:
+            return False
+        if self.stereo_mode == "mvc":
+            return True
+        if self.eye_height == 0:
+            return False
+        eye_aspect = self.eye_width / self.eye_height
+        if self.stereo_mode == "side_by_side":
+            return eye_aspect >= 1.3
+        if self.stereo_mode == "top_bottom":
+            return eye_aspect <= 2.7
+        return False
+
+    @property
     def resolution_label(self) -> str:
         h = self.height
         if h >= 2160:
@@ -106,6 +154,11 @@ class AudioTrack:
     has_dtsx: bool = False   # DTS:X
     is_lossless: bool = False  # TrueHD, DTS-HD MA, FLAC, PCM
     real_channels: int | None = None  # Actual active channels (detected via RMS analysis)
+    # Quality analysis (ffmpeg astats); None = not analyzed
+    snr_db: float | None = None           # RMS level minus quietest-window RMS
+    noise_floor_db: float | None = None   # RMS of the quietest window
+    clip_ratio: float | None = None       # Share of samples stuck at peak level
+    hf_level_db: float | None = None      # RMS above 16 kHz, relative to overall RMS
 
     @property
     def spatial_format(self) -> str:
@@ -212,10 +265,17 @@ class VideoFile:
     compatibility_score: float = 0.0
     compatibility_issues: list[str] = field(default_factory=list)
     source_type: str = ""  # "BDRip", "WEB-DL", "HDTV", "DVDRip", etc.
+    # Master-grade indicators measured from the content (never names/tags)
+    remaster_evidence: list[str] = field(default_factory=list)
     # For episode matching
     series_title: str = ""
     season: int | None = None
     episode: int | None = None
+
+    @property
+    def is_remaster(self) -> bool:
+        """Measured native detail and verified HDR (see probe.detect_remaster)."""
+        return len(self.remaster_evidence) >= 2
 
     @property
     def file_size_gb(self) -> float:

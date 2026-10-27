@@ -7,7 +7,7 @@ from pathlib import Path
 
 from models import VideoFile
 from profiles import ScoringWeights
-from scoring import bits_per_pixel, effective_bitrate, score_breakdown
+from scoring import audio_quality_flags, bits_per_pixel, effective_bitrate, score_breakdown
 
 
 def compare_pair(a: VideoFile, b: VideoFile) -> dict:
@@ -69,7 +69,7 @@ def format_file_info(vf: VideoFile, verbose: bool = False, weights: ScoringWeigh
         lines.append(
             f"  Audio #{i + 1}: {at.format_label} {at.channel_label} "
             f"({at.channels}ch) | {br_kbps:.0f} kbps | "
-            f"{lang}{spatial_str}{lossless_str}{title_str}"
+            f"{lang}{spatial_str}{lossless_str}{title_str} {_audio_quality_label(at)}".rstrip()
         )
 
     # Subtitles
@@ -251,6 +251,8 @@ _COLOR_RULES: dict[str, tuple[bool, float]] = {
     "Integrity": (True, 0.1),
     "Language tracks": (True, 0.1),
     "Size efficiency": (True, 0.1),
+    "3D format": (True, 0.1),
+    "Master-grade": (True, 0.1),
     "TOTAL": (True, 0.01),
 }
 
@@ -308,6 +310,23 @@ def _audio_summary(vf: VideoFile) -> str:
     return " ".join(parts)
 
 
+def _stereo_label(vf: VideoFile) -> str:
+    """3D cell: layout, full/half resolution and per-eye size."""
+    v = vf.video
+    if not v.is_3d:
+        return "-"
+    label = v.stereo_mode
+    if v.stereo_divisor > 1:
+        label += f" {'full' if v.stereo_full_res else 'half'} ({v.eye_width}x{v.eye_height}/eye)"
+    return label
+
+
+def _audio_quality_label(at) -> str:
+    """Short audio quality note (noise / clipping / band-limited)."""
+    flags = audio_quality_flags(at)
+    return f"[{', '.join(flags)}]" if flags else ""
+
+
 def _audio_tracks_detail(vf: VideoFile) -> list[str]:
     """List of all audio tracks as formatted strings."""
     lines = []
@@ -326,6 +345,9 @@ def _audio_tracks_detail(vf: VideoFile) -> list[str]:
             parts.append("lossless")
         if at.title:
             parts.append(f"«{at.title}»")
+        quality = _audio_quality_label(at)
+        if quality:
+            parts.append(quality)
         lines.append(" ".join(parts))
     return lines
 
@@ -402,6 +424,7 @@ def format_group_comparison(
         rows = [
             ["File", *[vf.display_name for vf in ranked]],
             ["Source", *[vf.source_type or "-" for vf in ranked]],
+            ["Master evidence", *[", ".join(vf.remaster_evidence) if vf.is_remaster else "-" for vf in ranked]],
             ["Container", *[vf.container.split(",")[0] for vf in ranked]],
             ["Size", *[vf.file_size_human for vf in ranked]],
             ["Duration", *[vf.duration_human for vf in ranked]],
@@ -425,7 +448,7 @@ def format_group_comparison(
                 if vf.video.has_black_bars else "-"
                 for vf in ranked
             ]],
-            ["3D", *[f"{vf.video.stereo_mode}" if vf.video.is_3d else "-" for vf in ranked]],
+            ["3D", *[_stereo_label(vf) for vf in ranked]],
             ["Upscale", *[
                 f"YES (real ~{vf.video.real_height}p)" if vf.video.is_upscaled and vf.video.real_height
                 else ("YES" if vf.video.is_upscaled else "-")
@@ -485,7 +508,9 @@ def format_group_comparison(
                 for vf in ranked
             ]])
         if any(vf.video.is_3d for vf in ranked):
-            rows.append(["3D", *[vf.video.stereo_mode if vf.video.is_3d else "-" for vf in ranked]])
+            rows.append(["3D", *[_stereo_label(vf) for vf in ranked]])
+        if any(vf.is_remaster for vf in ranked):
+            rows.append(["Master evidence", *["YES" if vf.is_remaster else "-" for vf in ranked]])
         rows.extend([
             ["Compat issues", *[str(len(vf.compatibility_issues)) for vf in ranked]],
             ["TOTAL", *[f"{vf.score:.1f} pts" for vf in ranked]],
@@ -646,6 +671,8 @@ def export_json(files: list[VideoFile], cfg=None) -> str:
             "duration_human": vf.duration_human,
             "container": vf.container,
             "source_type": vf.source_type,
+            "is_remaster": vf.is_remaster,
+            "remaster_evidence": vf.remaster_evidence,
             "video": {
                 "codec": vf.video.codec,
                 "profile": vf.video.profile,
@@ -661,6 +688,8 @@ def export_json(files: list[VideoFile], cfg=None) -> str:
                 "hdr_type": vf.video.hdr_type,
                 "is_3d": vf.video.is_3d,
                 "stereo_mode": vf.video.stereo_mode,
+                "stereo_full_res": vf.video.stereo_full_res,
+                "eye_resolution": f"{vf.video.eye_width}x{vf.video.eye_height}",
                 "is_upscaled": vf.video.is_upscaled,
                 "real_height": vf.video.real_height,
                 "crop_width": vf.video.crop_width,
@@ -677,6 +706,10 @@ def export_json(files: list[VideoFile], cfg=None) -> str:
                     "profile": at.profile,
                     "channels": at.channels,
                     "real_channels": at.real_channels,
+                    "snr_db": at.snr_db,
+                    "noise_floor_db": at.noise_floor_db,
+                    "clip_ratio": at.clip_ratio,
+                    "hf_level_db": at.hf_level_db,
                     "effective_channels": at.effective_channels,
                     "channel_layout": at.channel_label,
                     "bitrate": at.bitrate,

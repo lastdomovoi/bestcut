@@ -34,6 +34,8 @@ missing_primary_penalty = 10.0
 extra_primary_track_bonus = 1.5
 # Bonus per extra_languages track present (max 3.0).
 extra_language_bonus = 1.5
+# Analyze noise, clipping and band-limiting of the best audio track (ffmpeg).
+analyze_quality = true
 """
 
 from __future__ import annotations
@@ -120,6 +122,8 @@ class Config:
         self.missing_primary_penalty: float = 10.0
         self.extra_primary_track_bonus: float = 1.5
         self.extra_language_bonus: float = 1.5
+        self.analyze_audio_quality: bool = True
+        self.analyze_picture: bool = True
 
     @classmethod
     def load(cls) -> "Config":
@@ -137,6 +141,7 @@ class Config:
         cfg.profile = general.get("profile", cfg.profile)
         cfg.verbose = general.get("verbose", cfg.verbose)
         cfg.check_integrity = general.get("check_integrity", cfg.check_integrity)
+        cfg.analyze_picture = bool(general.get("analyze_picture", cfg.analyze_picture))
 
         weights_data = data.get("weights", {})
         if weights_data:
@@ -160,6 +165,9 @@ class Config:
         cfg.extra_language_bonus = float(
             audio.get("extra_language_bonus", cfg.extra_language_bonus)
         )
+        cfg.analyze_audio_quality = bool(
+            audio.get("analyze_quality", cfg.analyze_audio_quality)
+        )
 
         return cfg
 
@@ -176,6 +184,8 @@ profile = "default"
 verbose = false
 # Integrity check: "none", "quick", "full"
 check_integrity = "none"
+# Measure picture detail/HDR peak on sample frames (master-grade detection).
+analyze_picture = true
 
 [weights]
 # Custom weights (override profile). Uncomment as needed.
@@ -186,6 +196,8 @@ check_integrity = "none"
 # subtitles = 1.0
 # compatibility = 1.0
 # file_size = 0.0
+# stereo3d = 1.0
+# remaster = 1.0   # measured HDR master bonus
 
 [devices]
 # Devices for compatibility check (empty = all).
@@ -203,5 +215,7 @@ missing_primary_penalty = 10.0
 extra_primary_track_bonus = 1.5
 # Bonus per extra_languages track present (max 3.0).
 extra_language_bonus = 1.5
+# Analyze noise, clipping and band-limiting of the best audio track (ffmpeg).
+analyze_quality = true
 ''', encoding="utf-8")
         return CONFIG_PATH

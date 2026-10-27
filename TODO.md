@@ -26,13 +26,13 @@
 
 ## Improvements
 
-- [ ] **3D video comparison** — score 3D formats (SBS, top-bottom, MVC), account for effective resolution (SBS halves width), factor into scoring. Currently 3D is detected but not scored _(added: 2026-04-05)_
-- [ ] **Audio quality analysis** — SNR (signal-to-noise ratio) via ffmpeg astats, detect clicks/crackling, spectral analysis. Penalty for noisy audio _(added: 2026-04-05)_
-- [ ] **Digital remaster detection** — bonus for remastered releases by metadata (encoder/title tags), characteristics (newer codec, higher bit depth, better color space), filename patterns (Remastered, Restored, 4K Scan) _(added: 2026-04-05)_
-- [ ] **Real video encoder detection** — currently encoder shows muxer (libebml/libmatroska), need to parse encoding_tool or writing_application from MKV tags to identify x264/x265/rav1e _(added: 2026-04-05)_
-
 ## Technical debt
 
 ## Future ideas
 
 ## Done
+
+- [x] **3D video comparison** — per-eye effective resolution (SBS/top-bottom halve a frame axis), full vs half detection, format bonus (MVC > full > half); fixed stereo mode names and filename false positives _(2026-10-27)_
+- [x] **Audio quality analysis** — noise floor in pauses, clipping ratio and band-limiting (<16 kHz on lossless) via ffmpeg astats; penalty folded into audio score. Not done: click/crackle detection _(2026-10-27)_
+- [x] **Digital remaster detection** — inferred only from measured content (names/tags are ignored, they can be faked): native detail via half-res round-trip PSNR on 3 sample points plus verified HDR10 peak luma; both required, +2 bonus. A heuristic: with no reference it finds modern HDR masters, not SDR remasters _(2026-10-27)_
+- [x] **Real video encoder detection** — x264/x265 banner from bitstream, then stream/container tags, muxer names ignored _(2026-10-27)_

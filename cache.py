@@ -15,13 +15,16 @@ from pathlib import Path
 
 from models import AudioTrack, IntegrityResult, SubtitleTrack, VideoFile, VideoTrack
 
+# Bump when probe output changes so stale entries are not reused.
+CACHE_VERSION = 3
+
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "bestcut"
 
 
 def _cache_key(path: Path) -> str:
     """Create cache key based on path, size and mtime."""
     stat = path.stat()
-    raw = f"{path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
+    raw = f"v{CACHE_VERSION}|{path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
