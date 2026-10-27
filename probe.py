@@ -428,24 +428,25 @@ def detect_3d(path: Path, vf: VideoFile) -> None:
         vf.video.stereo_mode = "mvc"
         return
 
-    # Check stream side_data for stereo3d info (ffprobe)
+    # Stereo3D side data: the layout type is on the stream; frame-level
+    # entries only say that the marker exists.
     cmd = [
         "ffprobe", "-v", "quiet", "-print_format", "json",
         "-select_streams", "v:0",
-        "-show_frames", "-read_intervals", "%+#1",
-        "-show_entries", "frame=side_data_list",
+        "-show_entries", "stream_side_data",
         str(path),
     ]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         data = json.loads(result.stdout)
-        for frame in data.get("frames", []):
-            for sd in frame.get("side_data_list", []):
-                sd_type = sd.get("side_data_type", "").lower()
-                if "stereo3d" in sd_type or "stereo 3d" in sd_type:
-                    mode = str(sd.get("type", "")).strip()
-                    if mode.lower() in ("", "2d"):
-                        return  # metadata says flat; ignore filename hints
+        for stream in data.get("streams", []):
+            for sd in stream.get("side_data_list", []):
+                if "stereo 3d" not in sd.get("side_data_type", "").lower():
+                    continue
+                mode = str(sd.get("type", "")).strip()
+                if mode.lower() == "2d":
+                    return  # metadata says flat; ignore filename hints
+                if mode:
                     vf.video.is_3d = True
                     vf.video.stereo_mode = _normalize_stereo_mode(mode)
                     return
