@@ -5,3 +5,4 @@ CLAUDE.md
 .cache/
 .remember/
 config.toml
+.worktrees/

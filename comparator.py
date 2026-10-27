@@ -400,7 +400,7 @@ def format_group_comparison(
         headers = ["", "#1 ★ BEST", *[f"#{i+2}" for i in range(len(ranked)-1)]]
         _bpp = lambda vf: f"{bits_per_pixel(vf):.4f}" if bits_per_pixel(vf) > 0 else "?"
         rows = [
-            ["File", *[vf.path.name for vf in ranked]],
+            ["File", *[vf.display_name for vf in ranked]],
             ["Source", *[vf.source_type or "-" for vf in ranked]],
             ["Container", *[vf.container.split(",")[0] for vf in ranked]],
             ["Size", *[vf.file_size_human for vf in ranked]],
@@ -470,7 +470,7 @@ def format_group_comparison(
     else:
         headers = ["", "#1 ★ BEST", *[f"#{i+2}" for i in range(len(ranked)-1)]]
         rows = [
-            ["File", *[vf.path.name for vf in ranked]],
+            ["File", *[vf.display_name for vf in ranked]],
             ["Size", *[vf.file_size_human for vf in ranked]],
             ["Video", *[f"{vf.video.codec.upper()} {vf.video.resolution_label} {v_br(vf)} Mbps" for vf in ranked]],
             ["FPS", *[f"{vf.video.fps:.0f}" for vf in ranked]],
@@ -520,7 +520,7 @@ def format_group_comparison(
     if diff < 2.0:
         lines.append(f"  Result: roughly equal (difference {diff:.1f})")
     else:
-        lines.append(f"  {_GREEN}{_BOLD}Recommendation: {best.path.name} (+{diff:.1f} pts){_RESET}")
+        lines.append(f"  {_GREEN}{_BOLD}Recommendation: {best.display_name} (+{diff:.1f} pts){_RESET}")
 
     # Key differences summary
     if len(ranked) >= 2:
