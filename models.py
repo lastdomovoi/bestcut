@@ -14,7 +14,8 @@ class VideoTrack:
     width: int = 0
     height: int = 0
     bitrate: int = 0  # bps
-    fps: float = 0.0
+    fps: float = 0.0          # effective playback rate (see probe.effective_fps)
+    nominal_fps: float = 0.0  # container's r_frame_rate, diagnostic only
     bit_depth: int = 8
     pix_fmt: str = ""
     color_space: str = ""
@@ -33,6 +34,12 @@ class VideoTrack:
     detail_psnr: float | None = None  # PSNR vs. half-res round trip; high = no fine detail
     peak_luma: float | None = None    # Median frame peak luma, fraction of code range
     picture_measured: bool = False    # measurement attempted (also set on failure)
+
+    @property
+    def fps_mismatch(self) -> bool:
+        """Nominal rate contradicts the effective one (doubled, VFR...)."""
+        return (self.nominal_fps > 0 and self.fps > 0
+                and abs(self.nominal_fps - self.fps) > self.fps * 0.05)
 
     @property
     def has_black_bars(self) -> bool:
@@ -265,6 +272,7 @@ class VideoFile:
     compatibility_score: float = 0.0
     compatibility_issues: list[str] = field(default_factory=list)
     source_type: str = ""  # "BDRip", "WEB-DL", "HDTV", "DVDRip", etc.
+    metadata_warnings: list[str] = field(default_factory=list)
     # Master-grade indicators measured from the content (never names/tags)
     remaster_evidence: list[str] = field(default_factory=list)
     # For episode matching

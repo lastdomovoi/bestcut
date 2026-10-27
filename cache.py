@@ -16,7 +16,7 @@ from pathlib import Path
 from models import AudioTrack, IntegrityResult, SubtitleTrack, VideoFile, VideoTrack
 
 # Bump when probe output changes so stale entries are not reused.
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "bestcut"
 
@@ -43,6 +43,7 @@ def _serialize(vf: VideoFile) -> dict:
         "video": asdict(vf.video),
         "audio_tracks": [asdict(a) for a in vf.audio_tracks],
         "subtitle_tracks": [asdict(s) for s in vf.subtitle_tracks],
+        "metadata_warnings": vf.metadata_warnings,
     }
 
 
@@ -65,6 +66,7 @@ def _deserialize(data: dict) -> VideoFile:
         video=_safe_construct(VideoTrack, data["video"]),
         audio_tracks=[_safe_construct(AudioTrack, a) for a in data["audio_tracks"]],
         subtitle_tracks=[_safe_construct(SubtitleTrack, s) for s in data["subtitle_tracks"]],
+        metadata_warnings=list(data.get("metadata_warnings", [])),
     )
     return vf
 

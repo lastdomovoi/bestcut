@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 
+from languages import (is_unknown_language, language_matches, normalize_language,
+                       primary_language_status)
 from models import VideoFile
 from profiles import ScoringWeights
 
@@ -151,7 +153,7 @@ def select_best_audio(vf: VideoFile, primary_language: str = ""):
         return None
     pool = vf.audio_tracks
     if primary_language:
-        pool = [at for at in pool if at.language == primary_language] or pool
+        pool = [at for at in pool if language_matches(at.language, primary_language)] or pool
     return max(pool, key=_audio_track_rank)
 
 
@@ -246,7 +248,8 @@ def score_audio(vf: VideoFile, primary_language: str = "") -> float:
         bitrate_score = 1.0
 
     # Multi-language (0-3)
-    languages = {at.language for at in vf.audio_tracks if at.language}
+    languages = {normalize_language(at.language) for at in vf.audio_tracks
+                 if not is_unknown_language(at.language)}
     multi_score = min(3.0, len(languages) * 1.0)
 
     base = spatial_score + codec_score + channel_score + bitrate_score + multi_score
@@ -287,7 +290,7 @@ def score_language_tracks(vf: VideoFile,
                          extra_language_bonus: float = 1.5) -> float:
     """Score based on audio language availability.
 
-    - Penalty if primary language is absent.
+    - Penalty if primary language is confirmed absent (not if tags are missing).
     - Bonus for multiple tracks in primary language (dubs, commentary).
     - Bonus for each extra language present.
     """
@@ -296,10 +299,13 @@ def score_language_tracks(vf: VideoFile,
 
     score = 0.0
     primary_tracks = [at for at in vf.audio_tracks
-                      if at.language == primary_language]
+                      if language_matches(at.language, primary_language)]
 
     if not primary_tracks:
-        score -= missing_primary_penalty
+        # Penalize only confirmed absence; untagged tracks may well be
+        # the preferred language, so "unknown" is neutral (needs review).
+        if primary_language_status(vf, primary_language) == "absent":
+            score -= missing_primary_penalty
     else:
         # Bonus for extra primary-language tracks (beyond the first)
         extra_count = len(primary_tracks) - 1
@@ -308,8 +314,10 @@ def score_language_tracks(vf: VideoFile,
 
     # Bonus for extra languages
     if extra_languages:
-        available = {at.language for at in vf.audio_tracks if at.language}
-        present = sum(1 for lang in extra_languages if lang in available)
+        available = {normalize_language(at.language) for at in vf.audio_tracks
+                     if not is_unknown_language(at.language)}
+        present = sum(1 for lang in extra_languages
+                      if normalize_language(lang) in available)
         score += min(3.0, present * extra_language_bonus)
 
     return score

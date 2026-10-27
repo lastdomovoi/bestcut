@@ -8,6 +8,7 @@ import statistics
 import subprocess
 from pathlib import Path
 
+from procutil import run_tool
 from models import AudioTrack, SubtitleTrack, VideoFile, VideoTrack
 
 
@@ -24,10 +25,13 @@ def _run_ffprobe(path: Path, *extra_args: str) -> dict:
         "ffprobe", "-v", "quiet", "-print_format", "json",
         *extra_args, str(path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    result = run_tool(cmd, timeout=60)
     if result.returncode != 0:
         raise RuntimeError(f"ffprobe failed with error: {result.stderr.strip()}")
-    return json.loads(result.stdout)
+    data = json.loads(result.stdout)
+    if result.decode_note:
+        data["_decode_note"] = result.decode_note
+    return data
 
 
 # Known video encoders, matched against tag strings (first match wins).
@@ -122,6 +126,62 @@ def _parse_fps(rate_str: str) -> float:
         den_f = float(den)
         return float(num) / den_f if den_f else 0.0
     return float(rate_str)
+
+
+# Frame rates players really use; measured rates within 0.3% snap to these.
+STANDARD_FPS = (23.976, 24.0, 25.0, 29.97, 30.0, 48.0, 50.0, 59.94, 60.0,
+                119.88, 120.0)
+
+
+def effective_fps(stream: dict, container_duration: float = 0.0) -> float:
+    """Actual playback frame rate, not the container's nominal one.
+
+    `r_frame_rate` is the lowest rate that can represent every timestamp
+    and is often doubled (e.g. 60000/1001 for 29.97 fps content).  Prefer
+    frame count / duration, then the timestamp-derived `avg_frame_rate`,
+    and use the nominal rate only when nothing else is available.
+    """
+    nominal = _parse_fps(stream.get("r_frame_rate", ""))
+    avg = _parse_fps(stream.get("avg_frame_rate", ""))
+    measured = 0.0
+    try:
+        frames = int(stream.get("nb_frames") or 0)
+    except (TypeError, ValueError):
+        frames = 0
+    # Only the stream's own duration: the container may be padded by a
+    # longer audio track, which would understate the rate.
+    duration = float(stream.get("duration") or 0)
+    if frames > 1 and duration > 0:
+        measured = frames / duration
+    fps = measured or avg or nominal
+    nearest = min(STANDARD_FPS, key=lambda std: abs(fps - std))
+    if fps > 0 and abs(fps - nearest) <= nearest * 0.003:
+        return nearest
+    return round(fps, 3)
+
+
+def normalize_level(codec: str, level) -> str:
+    """Level as the usual decimal string, per codec convention.
+
+    AVC level_idc is 10x the level (41 -> 4.1); HEVC general_level_idc is
+    30x the level (150 -> 5.0, 153 -> 5.1).  Unknown / reserved values
+    (<= 0, -99) give "".
+    """
+    try:
+        value = float(level)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    if codec in ("hevc", "h265"):
+        return f"{value / 30:.1f}"
+    if codec == "h264":
+        if value == 9:
+            return "1.0"  # level 1b
+        return f"{value / 10:.1f}" if value > 9 else f"{value:.1f}"
+    if codec in ("av1", "vp9", "vp8"):
+        return ""  # level scales not comparable with compat limits
+    return str(level)
 
 
 def _detect_hdr(stream: dict, frames_data: dict | None) -> str:
@@ -247,9 +307,7 @@ def detect_real_channels(path: Path, stream_index: int, channels: int,
         "-f", "null", "-",
     ]
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120,
-        )
+        result = run_tool(cmd, timeout=120)
     except (subprocess.TimeoutExpired, OSError):
         return None
 
@@ -323,7 +381,7 @@ def detect_crop_and_upscale(path: Path, vf: VideoFile) -> None:
         "-f", "null", "-",
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        result = run_tool(cmd, timeout=60)
         crop_lines = re.findall(r"crop=(\d+):(\d+):\d+:\d+", result.stderr)
         if crop_lines:
             # Take last (most stable) crop value
@@ -437,7 +495,7 @@ def detect_3d(path: Path, vf: VideoFile) -> None:
         str(path),
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = run_tool(cmd, timeout=30)
         data = json.loads(result.stdout)
         for stream in data.get("streams", []):
             for sd in stream.get("side_data_list", []):
@@ -461,7 +519,7 @@ def detect_3d(path: Path, vf: VideoFile) -> None:
         str(path),
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        result = run_tool(cmd, timeout=15)
         data = json.loads(result.stdout)
         for stream in data.get("streams", []):
             mode = _lower_tags(stream.get("tags")).get("stereo_mode", "").strip()
@@ -523,7 +581,7 @@ def measure_picture(path: Path, vf: VideoFile) -> bool:
                "-map", "[p]", "-f", "null", "-",
                "-map", "[q]", "-f", "null", "-"]
         try:
-            run = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            run = run_tool(cmd, timeout=120)
         except (subprocess.TimeoutExpired, OSError):
             continue
         m = re.search(r"PSNR (?:y|gray|r):(inf|[\d.]+)", run.stderr)
@@ -709,7 +767,7 @@ def analyze_audio_quality(path: Path, stream_index: int, duration: float,
     if with_hf:
         cmd += ["-map", "[bo]", "-f", "null", "-"]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = run_tool(cmd, timeout=120)
     except (subprocess.TimeoutExpired, OSError):
         return None
 
@@ -784,6 +842,7 @@ def probe_file(path: Path, use_cache: bool = True) -> VideoFile:
 
     fmt = data.get("format", {})
     streams = data.get("streams", [])
+    note = data.get("_decode_note", "")
 
     vf = VideoFile(
         path=path,
@@ -812,9 +871,7 @@ def probe_file(path: Path, use_cache: bool = True) -> VideoFile:
     for s in streams:
         if s.get("codec_type") != "video":
             continue
-        level = s.get("level", "")
-        if isinstance(level, int) and level > 0:
-            level = str(level / 10) if level > 9 else str(level)
+        level = normalize_level(s.get("codec_name", ""), s.get("level"))
         encoder = detect_video_encoder(path, s.get("tags", {}), fmt.get("tags", {}))
 
         vf.video = VideoTrack(
@@ -824,7 +881,8 @@ def probe_file(path: Path, use_cache: bool = True) -> VideoFile:
             width=int(s.get("width", 0)),
             height=int(s.get("height", 0)),
             bitrate=int(s.get("bit_rate", 0) or 0),
-            fps=_parse_fps(s.get("r_frame_rate", "")),
+            fps=effective_fps(s, vf.duration),
+            nominal_fps=_parse_fps(s.get("r_frame_rate", "")),
             bit_depth=_parse_bit_depth(s),
             pix_fmt=s.get("pix_fmt", ""),
             color_space=s.get("color_space", ""),
@@ -891,6 +949,10 @@ def probe_file(path: Path, use_cache: bool = True) -> VideoFile:
             forced=bool(disp.get("forced", 0)),
             default=bool(disp.get("default", 0)),
         ))
+
+    if note:
+        vf.metadata_warnings.append(
+            f"metadata text is {note}; tag text may be damaged, stream data unaffected")
 
     # Save to cache
     if use_cache:

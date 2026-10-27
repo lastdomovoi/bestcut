@@ -10,6 +10,8 @@ from models import VideoFile
 
 # Patterns for extracting season/episode (in priority order)
 EPISODE_PATTERNS = [
+    # Russian: "Сезон №4. Серия №071", "Сезон 4 Серия 12"
+    re.compile(r'Сезон[\s_№]*(\d{1,3})[\W_]*Сери[яи][\s_№]*(\d{1,4})', re.IGNORECASE),
     # S01E01, S1E1, s01e01, S01.E01, S01_E01, S2_E05, S1 E1
     re.compile(r'[Ss](\d{1,3})[._\-\s]*[Ee](\d{1,3})'),
     # 1x01, 01x01
@@ -32,14 +34,55 @@ VIDEO_EXTENSIONS = {
 }
 
 
-def parse_episode(filename: str) -> tuple[int | None, int | None]:
+# Explicit absolute episode number after the SxxEyy marker: "s10e01.(181)"
+_ABSOLUTE_RE = re.compile(r'[Ss]\d{1,3}[._\-\s]*[Ee]\d{1,3}[._\-\s]*\((\d{1,4})\)')
+# Zero-padded Russian episode number ("Серия №071") counts as absolute
+_RU_ABSOLUTE_RE = re.compile(r'Сезон[\s_№]*\d{1,3}[\W_]*Сери[яи][\s_№]*(0\d{2,3})', re.IGNORECASE)
+
+
+def _strip_ext(filename: str) -> str:
+    """Drop a video extension only.
+
+    Path.stem would also eat the ".S01_E02" tail of a directory name.
+    """
+    p = Path(filename)
+    return p.stem if p.suffix.lower() in VIDEO_EXTENSIONS else p.name
+
+
+# "(1080)" / "(2019)" are resolutions and years, not episode numbers
+_NOT_EPISODE_NUMBERS = {240, 360, 480, 576, 720, 1080, 1440, 2160}
+
+
+def parse_absolute_episode(filename: str) -> int | None:
+    """Explicit series-wide episode number, if the name carries one."""
+    name = _strip_ext(filename)
+    for pattern in (_ABSOLUTE_RE, _RU_ABSOLUTE_RE):
+        m = pattern.search(name)
+        if m:
+            n = int(m.group(1))
+            if n in _NOT_EPISODE_NUMBERS or 1900 <= n <= 2099:
+                continue
+            return n
+    return None
+
+
+# The first patterns carry an explicit season and episode marker; the rest
+# (bare E01, " - 01", trailing -1) are too loose for arbitrary directories.
+_STRICT_PATTERNS = 4
+PARENT_DEPTH = 3
+
+
+def parse_episode(filename: str, strict: bool = False) -> tuple[int | None, int | None]:
     """Extract (season, episode) from filename.
 
+    strict: only patterns with an explicit season/episode marker (used for
+    parent directory names, where "e5" in a hash must not look like E05).
     Returns (None, None) if not found.
     """
-    name = Path(filename).stem
+    name = _strip_ext(filename)
 
-    for i, pattern in enumerate(EPISODE_PATTERNS):
+    patterns = EPISODE_PATTERNS[:_STRICT_PATTERNS] if strict else EPISODE_PATTERNS
+    for i, pattern in enumerate(patterns):
         m = pattern.search(name)
         if m:
             groups = m.groups()
@@ -53,10 +96,11 @@ def parse_episode(filename: str) -> tuple[int | None, int | None]:
 
 def normalize_title(filename: str) -> str:
     """Extract and normalize series title from filename."""
-    name = Path(filename).stem
+    name = _strip_ext(filename)
 
     # Cut everything after season/episode marker
     cut_patterns = [
+        r'(?i)Сезон[\s_№]*\d',
         r'[Ss]\d{1,3}[._\-\s]*[Ee]',
         r'\d{1,2}[xX]\d{1,3}',
         r'[Ss]eason\s*\d',
@@ -157,10 +201,12 @@ def group_episodes(files: list[VideoFile]) -> dict[str, dict[tuple[int | None, i
         # If file itself has no episode info (e.g. BDMV/STREAM/00000.m2ts),
         # inspect parent directory names up the tree
         if episode is None:
-            for parent in vf.path.parents:
+            # Only the release folder and a couple of levels above it
+            # (BDMV/STREAM/00000.m2ts); not arbitrary ancestors.
+            for parent in list(vf.path.parents)[:PARENT_DEPTH]:
                 if parent.name in ("", "/", "Volumes", "Torrents", "video", "Projects"):
                     break
-                p_season, p_episode = parse_episode(parent.name)
+                p_season, p_episode = parse_episode(parent.name, strict=True)
                 if p_episode is not None:
                     season, episode = p_season, p_episode
                     title_source = parent.name
@@ -168,6 +214,10 @@ def group_episodes(files: list[VideoFile]) -> dict[str, dict[tuple[int | None, i
 
         vf.season = season
         vf.episode = episode
+        # An explicit series-wide number identifies the episode across
+        # releases whose season numbering differs.
+        absolute = parse_absolute_episode(fname)
+        key = (None, absolute) if absolute is not None else (season, episode)
 
         if episode is not None:
             title = normalize_title(title_source)
@@ -177,7 +227,7 @@ def group_episodes(files: list[VideoFile]) -> dict[str, dict[tuple[int | None, i
             title = normalize_title(fname) or vf.path.stem.lower()
             vf.series_title = title
 
-        groups[title][(season, episode)].append(vf)
+        groups[title][key].append(vf)
 
     # Merge groups that have different titles but same episode keys
     # (common when comparing releases with transliterated vs original names)

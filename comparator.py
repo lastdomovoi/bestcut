@@ -62,7 +62,7 @@ def format_file_info(vf: VideoFile, verbose: bool = False, weights: ScoringWeigh
     # Audio
     for i, at in enumerate(vf.audio_tracks):
         br_kbps = at.bitrate / 1000 if at.bitrate else 0
-        lang = at.language or "?"
+        lang = at.language or "unknown (untagged)"
         title_str = f" «{at.title}»" if at.title else ""
         spatial_str = f" [{at.spatial_format}]" if at.spatial_format else ""
         lossless_str = " (lossless)" if at.is_lossless and not at.spatial_format else ""
@@ -71,6 +71,9 @@ def format_file_info(vf: VideoFile, verbose: bool = False, weights: ScoringWeigh
             f"({at.channels}ch) | {br_kbps:.0f} kbps | "
             f"{lang}{spatial_str}{lossless_str}{title_str} {_audio_quality_label(at)}".rstrip()
         )
+
+    for w in vf.metadata_warnings:
+        lines.append(f"  ⚠ {w}")
 
     # Subtitles
     if vf.subtitle_tracks:
@@ -332,7 +335,7 @@ def _audio_tracks_detail(vf: VideoFile) -> list[str]:
     lines = []
     for i, at in enumerate(vf.audio_tracks):
         br_kbps = at.bitrate / 1000 if at.bitrate else 0
-        lang = at.language or "?"
+        lang = at.language or "unknown"
         sr = f"{at.sample_rate // 1000}kHz" if at.sample_rate else ""
         parts = [f"{at.format_label} {at.channel_label}"]
         parts.append(f"{br_kbps:.0f}k")
@@ -434,6 +437,9 @@ def format_group_comparison(
             ["Bitrate", *[f"{v_br(vf)} Mbps" for vf in ranked]],
             ["BPP", *[_bpp(vf) for vf in ranked]],
             ["FPS", *[f"{vf.video.fps:.2f}" for vf in ranked]],
+            *([["Nominal FPS", *[f"{vf.video.nominal_fps:.2f}" if vf.video.fps_mismatch else "-"
+                                 for vf in ranked]]]
+              if any(vf.video.fps_mismatch for vf in ranked) else []),
             ["Bit depth", *[f"{vf.video.bit_depth}-bit" for vf in ranked]],
             ["Color space", *[vf.video.color_space or "-" for vf in ranked]],
             ["Color transfer", *[vf.video.color_transfer or "-" for vf in ranked]],
@@ -671,6 +677,7 @@ def export_json(files: list[VideoFile], cfg=None) -> str:
             "duration_human": vf.duration_human,
             "container": vf.container,
             "source_type": vf.source_type,
+            "metadata_warnings": vf.metadata_warnings,
             "is_remaster": vf.is_remaster,
             "remaster_evidence": vf.remaster_evidence,
             "video": {
@@ -682,6 +689,8 @@ def export_json(files: list[VideoFile], cfg=None) -> str:
                 "resolution_label": vf.video.resolution_label,
                 "bitrate": vf.video.bitrate,
                 "fps": vf.video.fps,
+                "nominal_fps": vf.video.nominal_fps,
+                "fps_mismatch": vf.video.fps_mismatch,
                 "bit_depth": vf.video.bit_depth,
                 "color_space": vf.video.color_space,
                 "color_transfer": vf.video.color_transfer,

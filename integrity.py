@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 from models import IntegrityResult
+from procutil import run_tool
 
 
 def check_quick(path: Path) -> IntegrityResult:
@@ -14,32 +14,23 @@ def check_quick(path: Path) -> IntegrityResult:
     path = Path(path)
 
     # 1. Header check via ffprobe
-    probe = subprocess.run(
-        ["ffprobe", "-v", "error", str(path)],
-        capture_output=True, text=True, timeout=30,
-    )
+    probe = run_tool(["ffprobe", "-v", "error", str(path)], timeout=30)
     if probe.stderr.strip():
         for line in probe.stderr.strip().splitlines():
             result.errors.append(f"[headers] {line.strip()}")
             result.error_count += 1
 
     # 2. Decode first 30 seconds
-    head_check = subprocess.run(
-        ["ffmpeg", "-v", "error", "-ss", "0", "-t", "30",
-         "-i", str(path), "-f", "null", "-"],
-        capture_output=True, text=True, timeout=120,
-    )
+    head_check = run_tool(["ffmpeg", "-v", "error", "-ss", "0", "-t", "30",
+         "-i", str(path), "-f", "null", "-"], timeout=120)
     if head_check.stderr.strip():
         for line in head_check.stderr.strip().splitlines():
             result.errors.append(f"[start] {line.strip()}")
             result.error_count += 1
 
     # 3. Decode last 30 seconds
-    tail_check = subprocess.run(
-        ["ffmpeg", "-v", "error", "-sseof", "-30",
-         "-i", str(path), "-f", "null", "-"],
-        capture_output=True, text=True, timeout=120,
-    )
+    tail_check = run_tool(["ffmpeg", "-v", "error", "-sseof", "-30",
+         "-i", str(path), "-f", "null", "-"], timeout=120)
     if tail_check.returncode != 0 or tail_check.stderr.strip():
         stderr = tail_check.stderr.strip()
         if stderr:
@@ -59,10 +50,7 @@ def check_full(path: Path) -> IntegrityResult:
     result = IntegrityResult(checked=True)
     path = Path(path)
 
-    proc = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", str(path), "-f", "null", "-"],
-        capture_output=True, text=True, timeout=7200,  # up to 2 hours
-    )
+    proc = run_tool(["ffmpeg", "-v", "error", "-i", str(path), "-f", "null", "-"], timeout=7200)
     if proc.stderr.strip():
         lines = proc.stderr.strip().splitlines()
         for line in lines:

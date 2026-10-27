@@ -271,30 +271,76 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
     # Deletion recommendations
     if args.recommend_delete:
-        _print_delete_recommendations(groups)
+        _print_delete_recommendations(groups, cfg.primary_language)
 
     return 0
 
 
-def _print_delete_recommendations(
-    groups: dict,
-) -> None:
-    """Print deletion recommendations for worst duplicates."""
-    to_delete: list[VideoFile] = []
-    to_keep: list[VideoFile] = []
+# Durations of one episode/movie in two releases differ by less than this
+# share; larger gaps mean different cuts or different content.
+DURATION_TOLERANCE = 0.02
 
+
+def _group_review_reason(ep_key, files: list[VideoFile],
+                         primary_language: str = "") -> str:
+    """Why a group must not produce deletion advice ("" if it may)."""
+    if ep_key == (None, None):
+        # No proven episode identity: similar titles alone merged these.
+        dirs = [vf.path.parent for vf in files]
+        if len(set(dirs)) < len(dirs):
+            return "unparsed names, several files share a directory (different episodes?)"
+        durations = [vf.duration for vf in files]
+        if min(durations) <= 0:
+            return "unparsed names and unknown duration (not proven duplicates)"
+        if (max(durations) - min(durations)) > max(durations) * DURATION_TOLERANCE:
+            return "unparsed names with different durations (not proven duplicates)"
+    if primary_language:
+        from languages import primary_language_status
+        if any(primary_language_status(vf, primary_language) == "unknown" for vf in files):
+            return f"audio language of some tracks unknown (untagged), '{primary_language}' unconfirmed"
+    return ""
+
+
+def deletion_candidates(groups: dict, primary_language: str = ""):
+    """Split groups into (keep, delete, review) lists.
+
+    review: [(reason, files)] for groups that need a human decision.
+    """
+    to_keep: list[VideoFile] = []
+    to_delete: list[VideoFile] = []
+    review: list[tuple[str, list[VideoFile]]] = []
     for title, episodes in groups.items():
         for ep_key, files in episodes.items():
             if len(files) < 2:
                 continue
+            reason = _group_review_reason(ep_key, files, primary_language)
+            if reason:
+                review.append((reason, files))
+                continue
             ranked = sorted(files, key=lambda f: f.score, reverse=True)
             to_keep.append(ranked[0])
-            # All except the best — deletion candidates
-            for vf in ranked[1:]:
-                to_delete.append(vf)
+            to_delete.extend(ranked[1:])
+    return to_keep, to_delete, review
+
+
+def _print_delete_recommendations(
+    groups: dict,
+    primary_language: str = "",
+) -> None:
+    """Print deletion recommendations for worst duplicates."""
+    to_keep, to_delete, review = deletion_candidates(groups, primary_language)
+
+    if review:
+        print(f"\n{'=' * 70}")
+        print(" NEEDS REVIEW (no deletion advice)")
+        print(f"{'=' * 70}")
+        for reason, files in review:
+            print(f"  ? {reason}")
+            for vf in files:
+                print(f"      {vf.path}")
 
     if not to_delete:
-        print("\n  No duplicates found — nothing to delete.")
+        print("\n  No verified duplicates found — nothing to delete.")
         return
 
     total_save = sum(vf.file_size for vf in to_delete)
@@ -308,11 +354,6 @@ def _print_delete_recommendations(
     print()
 
     for vf in sorted(to_delete, key=lambda f: f.file_size, reverse=True):
-        ep_str = ""
-        if vf.season is not None:
-            ep_str = f" S{vf.season:02d}E{vf.episode:02d}"
-        elif vf.episode is not None:
-            ep_str = f" E{vf.episode:02d}"
         print(f"  DEL  {vf.path}")
         print(f"       {vf.file_size_human} | {vf.video.resolution_label} "
               f"{vf.video.codec.upper()} | {vf.score:.1f} points")
@@ -323,9 +364,7 @@ def _print_delete_recommendations(
     if len(to_keep) > 5:
         print(f"  ... and {len(to_keep) - 5} more")
 
-    print(f"\n  To delete, run:")
-    print(f"  bestcut ... --recommend-delete --json | jq -r '.[] | .path' | tr '\\n' '\\0' | xargs -0 rm")
-    print(f"\n  ⚠ WARNING: review the list before deleting!")
+    print(f"\n  ⚠ WARNING: bestcut never deletes files; review the list before removing anything!")
 
 
 def cmd_info(args: argparse.Namespace) -> int:
