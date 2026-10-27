@@ -123,6 +123,7 @@ class Config:
         self.extra_primary_track_bonus: float = 1.5
         self.extra_language_bonus: float = 1.5
         self.analyze_audio_quality: bool = True
+        self.analyze_picture: bool = True
 
     @classmethod
     def load(cls) -> "Config":
@@ -140,6 +141,7 @@ class Config:
         cfg.profile = general.get("profile", cfg.profile)
         cfg.verbose = general.get("verbose", cfg.verbose)
         cfg.check_integrity = general.get("check_integrity", cfg.check_integrity)
+        cfg.analyze_picture = bool(general.get("analyze_picture", cfg.analyze_picture))
 
         weights_data = data.get("weights", {})
         if weights_data:
@@ -182,6 +184,8 @@ profile = "default"
 verbose = false
 # Integrity check: "none", "quick", "full"
 check_integrity = "none"
+# Measure picture detail/HDR peak on sample frames (master-grade detection).
+analyze_picture = true
 
 [weights]
 # Custom weights (override profile). Uncomment as needed.
@@ -193,7 +197,7 @@ check_integrity = "none"
 # compatibility = 1.0
 # file_size = 0.0
 # stereo3d = 1.0
-# remaster = 1.0
+# remaster = 1.0   # measured HDR master bonus
 
 [devices]
 # Devices for compatibility check (empty = all).

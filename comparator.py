@@ -252,7 +252,7 @@ _COLOR_RULES: dict[str, tuple[bool, float]] = {
     "Language tracks": (True, 0.1),
     "Size efficiency": (True, 0.1),
     "3D format": (True, 0.1),
-    "Remaster": (True, 0.1),
+    "Master-grade": (True, 0.1),
     "TOTAL": (True, 0.01),
 }
 
@@ -424,7 +424,7 @@ def format_group_comparison(
         rows = [
             ["File", *[vf.path.name for vf in ranked]],
             ["Source", *[vf.source_type or "-" for vf in ranked]],
-            ["Remastered", *[", ".join(vf.remaster_evidence) if vf.is_remaster else "-" for vf in ranked]],
+            ["Master evidence", *[", ".join(vf.remaster_evidence) if vf.is_remaster else "-" for vf in ranked]],
             ["Container", *[vf.container.split(",")[0] for vf in ranked]],
             ["Size", *[vf.file_size_human for vf in ranked]],
             ["Duration", *[vf.duration_human for vf in ranked]],
@@ -510,7 +510,7 @@ def format_group_comparison(
         if any(vf.video.is_3d for vf in ranked):
             rows.append(["3D", *[_stereo_label(vf) for vf in ranked]])
         if any(vf.is_remaster for vf in ranked):
-            rows.append(["Remastered", *["YES" if vf.is_remaster else "-" for vf in ranked]])
+            rows.append(["Master evidence", *["YES" if vf.is_remaster else "-" for vf in ranked]])
         rows.extend([
             ["Compat issues", *[str(len(vf.compatibility_issues)) for vf in ranked]],
             ["TOTAL", *[f"{vf.score:.1f} pts" for vf in ranked]],

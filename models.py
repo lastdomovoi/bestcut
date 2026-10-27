@@ -29,6 +29,10 @@ class VideoTrack:
     crop_width: int | None = None   # Actual content width (without black bars)
     crop_height: int | None = None  # Actual content height (without black bars)
     duration: float = 0.0
+    # Picture measurements (None = not measured)
+    detail_psnr: float | None = None  # PSNR vs. half-res round trip; high = no fine detail
+    peak_luma: float | None = None    # Median frame peak luma, fraction of code range
+    picture_measured: bool = False    # measurement attempted (also set on failure)
 
     @property
     def has_black_bars(self) -> bool:
@@ -261,8 +265,7 @@ class VideoFile:
     compatibility_score: float = 0.0
     compatibility_issues: list[str] = field(default_factory=list)
     source_type: str = ""  # "BDRip", "WEB-DL", "HDTV", "DVDRip", etc.
-    # Remaster detection: hits from container tags (cached) and filename
-    remaster_tag_hits: list[str] = field(default_factory=list)
+    # Master-grade indicators measured from the content (never names/tags)
     remaster_evidence: list[str] = field(default_factory=list)
     # For episode matching
     series_title: str = ""
@@ -271,7 +274,8 @@ class VideoFile:
 
     @property
     def is_remaster(self) -> bool:
-        return bool(self.remaster_evidence)
+        """Measured native detail and verified HDR (see probe.detect_remaster)."""
+        return len(self.remaster_evidence) >= 2
 
     @property
     def file_size_gb(self) -> float:

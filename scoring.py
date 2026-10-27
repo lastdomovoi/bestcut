@@ -125,19 +125,12 @@ def score_3d(vf: VideoFile) -> float:
 
 
 def score_remaster(vf: VideoFile) -> float:
-    """Bonus (0-3) for remastered/restored releases.
+    """Bonus (0 or 2) for a measured modern HDR master.
 
-    Needs explicit evidence (tags or filename); modern characteristics
-    (HEVC/AV1, 10-bit+, HDR/BT.2020, 4K) raise a confirmed remaster's
-    bonus but never create one.
+    Needs both indicators from probe.detect_remaster (native detail and
+    verified HDR); nothing here depends on file names or tags.
     """
-    if not vf.is_remaster:
-        return 0.0
-    v = vf.video
-    modern = (v.codec in ("hevc", "h265", "av1") or v.bit_depth >= 10
-              or bool(v.hdr_type) or v.color_primaries == "bt2020"
-              or v.height >= 2160)
-    return 3.0 if modern else 2.0
+    return 2.0 if vf.is_remaster else 0.0
 
 
 def _audio_track_rank(a) -> tuple:
@@ -166,8 +159,8 @@ def select_best_audio(vf: VideoFile, primary_language: str = ""):
 # CLIP_RATIO_MIN is distortion; lossless content below BAND_LIMIT_HF_DB
 # (relative to overall RMS) above 16 kHz was probably transcoded from lossy.
 NOISE_FLOOR_MAX_DB = -50.0
-CLIP_RATIO_MIN = 1e-4
 BAND_LIMIT_HF_DB = -70.0
+CLIP_RATIO_MIN = 1e-4
 
 
 def audio_quality_flags(a) -> list[str]:
@@ -409,7 +402,7 @@ def score_breakdown(vf: VideoFile, weights: ScoringWeights | None = None,
     if vf.video.is_3d:
         result[f"3D format (x{weights.stereo3d})"] = score_3d(vf) * weights.stereo3d
     if vf.is_remaster:
-        result[f"Remaster (x{weights.remaster})"] = score_remaster(vf) * weights.remaster
+        result[f"Master-grade (x{weights.remaster})"] = score_remaster(vf) * weights.remaster
 
     # Size efficiency (bloat penalty)
     if vf.file_size_gb > 0 and vf.video.bitrate > 0:

@@ -20,7 +20,7 @@ class ScoringWeights:
     compatibility: float = 1.0    # Device compatibility
     file_size: float = 1.0        # Size efficiency (penalizes bloated encodes)
     stereo3d: float = 1.0         # 3D format fidelity bonus
-    remaster: float = 1.0         # Remastered/restored release bonus
+    remaster: float = 1.0         # Measured HDR master bonus (native detail + verified HDR)
 
     def as_dict(self) -> dict[str, float]:
         return {

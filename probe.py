@@ -478,24 +478,82 @@ def detect_3d(path: Path, vf: VideoFile) -> None:
         vf.video.stereo_mode = mode
 
 
-# --- Remaster detection ------------------------------------------------
+# --- Master-grade detection (measured from content) --------------------
 
-_REMASTER_RE = re.compile(
-    r"(?<![a-z0-9])(re-?master(?:ed)?|digitally[ ._-]restored|"
-    r"4k[ ._-]?(?:scan|restoration))(?![a-z0-9])",
-    re.I,
-)
+# Round trip through half resolution: above this PSNR (dB) nothing is lost,
+# so the picture has no detail above half of the native sampling.
+UPSCALE_PSNR_DB = 42.0
+
+# PQ (HDR10/HDR10+): 1000 nits sits near 0.75 of the code range, while
+# SDR-graded material in a PQ container peaks near 0.58.
+HDR_REAL_PEAK = 0.68
+
+# Sample points (fraction of duration) and frames per point; the median
+# over points keeps one dark or soft scene from deciding the verdict.
+PICTURE_POINTS = (0.25, 0.5, 0.75)
+PICTURE_FRAMES = 4
 
 
-def find_remaster_hits(text: str) -> list[str]:
-    """Return remaster markers (Remastered, 4K Scan...) in text."""
-    return [m.group(1) for m in _REMASTER_RE.finditer(text or "")]
+def measure_picture(path: Path, vf: VideoFile) -> bool:
+    """Measure detail (half-res round-trip PSNR) and peak luma.
+
+    Fills vf.video.detail_psnr / peak_luma and marks the picture as
+    measured, even on failure, so it is not retried on every run.
+    Returns True if the state changed (worth caching).
+    """
+    v = vf.video
+    if v.picture_measured:
+        return False
+    v.picture_measured = True
+    if not (v.width and v.height and vf.duration > 0):
+        return True
+
+    graph = ("[0:v:0]split=3[a][b][d];"
+             "[b]scale=trunc(iw/4)*2:trunc(ih/4)*2:flags=bicubic,"
+             f"scale={v.width}:{v.height}:flags=bicubic[c];"
+             "[a][c]psnr[p];"
+             "[d]signalstats,metadata=print:key=lavfi.signalstats.YMAX:file=-[q]")
+    psnrs: list[float] = []
+    peaks: list[float] = []
+    for point in PICTURE_POINTS:
+        cmd = ["ffmpeg", "-v", "info", "-nostdin", "-an", "-sn",
+               "-ss", str(int(vf.duration * point)), "-i", str(path),
+               "-frames:v", str(PICTURE_FRAMES), "-filter_complex", graph,
+               "-map", "[p]", "-f", "null", "-",
+               "-map", "[q]", "-f", "null", "-"]
+        try:
+            run = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+        m = re.search(r"PSNR (?:y|gray|r):(inf|[\d.]+)", run.stderr)
+        ymax = [float(x) for x in re.findall(r"YMAX=([\d.]+)", run.stdout)]
+        if m and ymax:
+            psnrs.append(100.0 if m.group(1) == "inf" else float(m.group(1)))
+            peaks.append(statistics.median(ymax))
+    if psnrs:
+        v.detail_psnr = statistics.median(psnrs)
+        v.peak_luma = statistics.median(peaks) / ((1 << max(8, v.bit_depth)) - 1)
+    return True
 
 
 def detect_remaster(path: Path, vf: VideoFile) -> None:
-    """Fill vf.remaster_evidence from container tags (cached) and filename."""
-    evidence = [f"tag: {h}" for h in vf.remaster_tag_hits]
-    evidence += [f"filename: {h}" for h in find_remaster_hits(path.stem)]
+    """Infer a modern HDR master from measurements only.
+
+    There is no reference to compare with, so this is an inference; names
+    and tags are ignored because they are trivially faked.  Both must hold:
+    - native detail: HD picture that loses detail in a half-res round trip
+      (a plain upscale does not)
+    - verified HDR: HDR10/HDR10+ whose highlights really use the HDR range
+      (an SDR grade in an HDR container does not)
+    """
+    v = vf.video
+    evidence: list[str] = []
+    if v.height >= 720 and v.detail_psnr is not None \
+            and v.detail_psnr < UPSCALE_PSNR_DB:
+        evidence.append(f"native detail ({v.detail_psnr:.0f} dB)")
+    if (v.hdr_type in ("hdr10", "hdr10+") and v.peak_luma is not None
+            and v.peak_luma > HDR_REAL_PEAK):
+        evidence.append(f"verified {v.hdr_type.upper()}")
     vf.remaster_evidence = evidence
 
 
@@ -832,16 +890,6 @@ def probe_file(path: Path, use_cache: bool = True) -> VideoFile:
             forced=bool(disp.get("forced", 0)),
             default=bool(disp.get("default", 0)),
         ))
-
-    # Remaster markers in container/stream titles and comments
-    texts = [_lower_tags(fmt.get("tags")).get(k, "")
-             for k in ("title", "comment", "description")]
-    for stream in streams:
-        texts.append(_lower_tags(stream.get("tags")).get("title", ""))
-    for text in texts:
-        for hit in find_remaster_hits(text):
-            if hit not in vf.remaster_tag_hits:
-                vf.remaster_tag_hits.append(hit)
 
     # Save to cache
     if use_cache:
