@@ -23,13 +23,15 @@ from comparator import (
     format_group_comparison,
 )
 from compatibility import check_compatibility, compatibility_score
+from cache import set_cached
 from episode_matcher import group_episodes, scan_directory
 from integrity import check_duration_sync, check_full, check_quick
 from models import VideoFile
-from probe import (detect_3d, detect_all_real_channels, detect_crop_and_upscale,
-                    detect_source_type, probe_file)
+from probe import (detect_3d, detect_all_real_channels, detect_audio_quality,
+                    detect_crop_and_upscale, detect_remaster, detect_source_type,
+                    probe_file)
 from profiles import ScoringWeights, get_profile, list_profiles, parse_custom_weights
-from scoring import calculate_score
+from scoring import calculate_score, select_best_audio
 
 
 def process_file(
@@ -53,6 +55,14 @@ def process_file(
     detect_crop_and_upscale(path, vf)
     detect_3d(path, vf)
     detect_source_type(path, vf)
+    detect_remaster(path, vf)
+
+    # Noise / clipping / band-limit analysis of the track scoring will use
+    if cfg.analyze_audio_quality:
+        best_audio = select_best_audio(vf, cfg.primary_language)
+        if best_audio is not None:
+            if detect_audio_quality(path, vf, vf.audio_tracks.index(best_audio)):
+                set_cached(path, vf)  # keep the analysis for the next run
 
     # Integrity
     if check_integrity == "quick":

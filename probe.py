@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import statistics
 import subprocess
 from pathlib import Path
 
@@ -27,6 +28,89 @@ def _run_ffprobe(path: Path, *extra_args: str) -> dict:
     if result.returncode != 0:
         raise RuntimeError(f"ffprobe failed with error: {result.stderr.strip()}")
     return json.loads(result.stdout)
+
+
+# Known video encoders, matched against tag strings (first match wins).
+_ENCODER_PATTERNS = [
+    (re.compile(r"x265", re.I), "x265"),
+    (re.compile(r"x264", re.I), "x264"),
+    (re.compile(r"svt-?av1", re.I), "SVT-AV1"),
+    (re.compile(r"rav1e", re.I), "rav1e"),
+    (re.compile(r"libaom|aomenc", re.I), "libaom"),
+    (re.compile(r"libvpx", re.I), "libvpx"),
+    (re.compile(r"nvenc", re.I), "NVENC"),
+    (re.compile(r"qsv|quick ?sync", re.I), "QSV"),
+    (re.compile(r"videotoolbox", re.I), "VideoToolbox"),
+    (re.compile(r"xvid", re.I), "Xvid"),
+    (re.compile(r"divx", re.I), "DivX"),
+]
+
+# Muxer / library strings: they say how the file was written, not encoded.
+_MUXER_RE = re.compile(
+    r"libebml|libmatroska|mkvmerge|mkvtoolnix|lavf|mp4box|gpac",
+    re.I,
+)
+
+# Encoder banners embedded in the bitstream (SEI user data).
+_SEI_PATTERNS = [
+    (re.compile(rb"x265 \(build \d+\)|x265 \[info\]"), "x265"),
+    (re.compile(rb"x264 - core \d+"), "x264"),
+]
+_SEI_SCAN_BYTES = 4 * 1024 * 1024
+
+
+def _lower_tags(tags: dict | None) -> dict[str, str]:
+    """Tags with lowercase keys (ffprobe key case differs by container)."""
+    return {str(k).lower(): str(v) for k, v in (tags or {}).items()}
+
+
+def _known_encoder(candidates: list[str]) -> str:
+    """Encoder named in tag strings (x264, x265...), or ""."""
+    for text in candidates:
+        for pattern, name in _ENCODER_PATTERNS:
+            if pattern.search(text):
+                return name
+    return ""
+
+
+def _first_non_muxer(candidates: list[str]) -> str:
+    """First tag string that is not a muxer/library name, or ""."""
+    for text in candidates:
+        if not _MUXER_RE.search(text):
+            return text[:60]
+    return ""
+
+
+def _scan_encoder_signature(path: Path) -> str:
+    """Look for an x264/x265 banner in the first bytes of the file."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(_SEI_SCAN_BYTES)
+    except OSError:
+        return ""
+    for pattern, name in _SEI_PATTERNS:
+        if pattern.search(head):
+            return name
+    return ""
+
+
+def detect_video_encoder(path: Path, stream_tags: dict, format_tags: dict) -> str:
+    """Identify the video encoder (x264, x265, ...), not the muxer.
+
+    Order: tags that name an encoder, bitstream banner (reads the head of
+    the file), then any tag string that is not a muxer.
+    """
+    st = _lower_tags(stream_tags)
+    ft = _lower_tags(format_tags)
+    candidates = [c.strip() for c in (
+        st.get("encoder", ""),
+        st.get("_statistics_writing_app", ""),
+        ft.get("writing_application", ""),
+        ft.get("encoder", ""),
+    ) if c and c.strip()]
+    return (_known_encoder(candidates)
+            or _scan_encoder_signature(path)
+            or _first_non_muxer(candidates))
 
 
 def _parse_fps(rate_str: str) -> float:
@@ -284,6 +368,58 @@ def detect_crop_and_upscale(path: Path, vf: VideoFile) -> None:
                     vf.video.real_height = real_h
 
 
+_STEREO_MODE_NAMES = {
+    # ffmpeg stereo3d side data "type"
+    "side by side": "side_by_side",
+    "side by side (quincunx subsampling)": "side_by_side",
+    "top and bottom": "top_bottom",
+    "frame alternate": "frame_sequential",
+    # MKV StereoMode tag as exposed by ffmpeg
+    "left_right": "side_by_side",
+    "right_left": "side_by_side",
+    "top_bottom": "top_bottom",
+    "bottom_top": "top_bottom",
+    # Numeric Matroska StereoMode values and legacy names
+    "1": "side_by_side", "11": "side_by_side", "side_by_side_left": "side_by_side",
+    "2": "top_bottom", "3": "top_bottom",
+}
+
+# Filename tokens (split on non-alphanumerics) -> stereo mode.
+_NAME_SBS = {"sbs", "hsbs", "fsbs", "halfsbs", "fullsbs"}
+_NAME_TAB = {"hou", "fou", "htab", "ftab", "halfou", "fullou",
+             "halftab", "fulltab"}
+_NAME_BARE = {"ou": "top_bottom", "tab": "top_bottom"}  # need a "3d" token too
+
+
+def _normalize_stereo_mode(raw: str) -> str:
+    """Map ffmpeg / MKV stereo mode names to our canonical names."""
+    key = raw.strip().lower()
+    if key in _STEREO_MODE_NAMES:
+        return _STEREO_MODE_NAMES[key]
+    return key.replace(" ", "_") or "unknown"
+
+
+def _stereo_mode_from_name(name: str) -> str:
+    """Return stereo mode implied by the filename, or "" if none."""
+    tokens = [t for t in re.split(r"[^a-z0-9]+", name.lower()) if t]
+    # Join "half-sbs" style pairs: ["half", "sbs"] -> "halfsbs"
+    joined = set(tokens)
+    for a, b in zip(tokens, tokens[1:]):
+        joined.add(a + b)
+    if "mvc" in joined:
+        return "mvc"
+    if joined & _NAME_SBS:
+        return "side_by_side"
+    if joined & _NAME_TAB:
+        return "top_bottom"
+    if "3d" in joined:
+        for tok, mode in _NAME_BARE.items():
+            if tok in joined:
+                return mode
+        return "unknown"
+    return ""
+
+
 def detect_3d(path: Path, vf: VideoFile) -> None:
     """Detect 3D/stereoscopic video from metadata and stream info."""
     # Check MVC codec (H.264 MVC for Blu-ray 3D)
@@ -307,8 +443,11 @@ def detect_3d(path: Path, vf: VideoFile) -> None:
             for sd in frame.get("side_data_list", []):
                 sd_type = sd.get("side_data_type", "").lower()
                 if "stereo3d" in sd_type or "stereo 3d" in sd_type:
+                    mode = str(sd.get("type", "")).strip()
+                    if mode.lower() in ("", "2d"):
+                        return  # metadata says flat; ignore filename hints
                     vf.video.is_3d = True
-                    vf.video.stereo_mode = sd.get("type", "unknown")
+                    vf.video.stereo_mode = _normalize_stereo_mode(mode)
                     return
     except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
         pass
@@ -324,33 +463,40 @@ def detect_3d(path: Path, vf: VideoFile) -> None:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         data = json.loads(result.stdout)
         for stream in data.get("streams", []):
-            tags = stream.get("tags", {})
-            mode = tags.get("stereo_mode", "").strip()
-            if mode and mode != "mono":
+            mode = _lower_tags(stream.get("tags")).get("stereo_mode", "").strip()
+            if mode and mode.lower() not in ("mono", "0"):
                 vf.video.is_3d = True
-                stereo_modes = {
-                    "1": "side_by_side",
-                    "2": "top_bottom",
-                    "3": "top_bottom",
-                    "side_by_side_left": "side_by_side",
-                    "top_bottom": "top_bottom",
-                }
-                vf.video.stereo_mode = stereo_modes.get(mode, mode)
+                vf.video.stereo_mode = _normalize_stereo_mode(mode)
                 return
     except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
         pass
 
     # Check filename for 3D indicators
-    name = path.name.lower()
-    if any(tag in name for tag in ("3d", "sbs", "hsbs", "half-sbs",
-                                    "ou", "hou", "half-ou", "tab")):
+    mode = _stereo_mode_from_name(path.name)
+    if mode:
         vf.video.is_3d = True
-        if "sbs" in name or "half-sbs" in name or "hsbs" in name:
-            vf.video.stereo_mode = "side_by_side"
-        elif "ou" in name or "hou" in name or "tab" in name:
-            vf.video.stereo_mode = "top_bottom"
-        else:
-            vf.video.stereo_mode = "unknown"
+        vf.video.stereo_mode = mode
+
+
+# --- Remaster detection ------------------------------------------------
+
+_REMASTER_RE = re.compile(
+    r"(?<![a-z0-9])(re-?master(?:ed)?|digitally[ ._-]restored|"
+    r"4k[ ._-]?(?:scan|restoration))(?![a-z0-9])",
+    re.I,
+)
+
+
+def find_remaster_hits(text: str) -> list[str]:
+    """Return remaster markers (Remastered, 4K Scan...) in text."""
+    return [m.group(1) for m in _REMASTER_RE.finditer(text or "")]
+
+
+def detect_remaster(path: Path, vf: VideoFile) -> None:
+    """Fill vf.remaster_evidence from container tags (cached) and filename."""
+    evidence = [f"tag: {h}" for h in vf.remaster_tag_hits]
+    evidence += [f"filename: {h}" for h in find_remaster_hits(path.stem)]
+    vf.remaster_evidence = evidence
 
 
 def detect_source_type(path: Path, vf: VideoFile) -> None:
@@ -406,6 +552,157 @@ def detect_all_real_channels(path: Path, vf: VideoFile) -> None:
         at.real_channels = detect_real_channels(path, i, at.channels, dur)
 
 
+# --- Audio quality -----------------------------------------------------
+
+# Sample length for quality analysis (seconds).
+AUDIO_QUALITY_SAMPLE_SEC = 30
+
+# Level reported for windows of digital silence (astats prints -inf).
+DIGITAL_SILENCE_DB = -120.0
+
+# Quietest window must be this far below the average to count as a pause.
+MIN_PAUSE_DEPTH_DB = 12.0
+
+# Content above this frequency is expected in real full-band audio.
+HF_CUTOFF_HZ = 16000
+
+
+
+def _astats_blocks(stderr: str, instance: str) -> dict[str, dict[str, float]]:
+    """Parse one named astats instance into {"Overall"|"1"|"2"...: values}."""
+    blocks: dict[str, dict[str, float]] = {}
+    current: dict[str, float] | None = None
+    prefix = f"[astats@{instance} @"
+    for line in stderr.splitlines():
+        if not line.startswith(prefix):
+            continue
+        body = line.split("] ", 1)[-1].strip()
+        if body == "Overall":
+            current = blocks.setdefault("Overall", {})
+        elif body.startswith("Channel:"):
+            current = blocks.setdefault(body.split(":", 1)[1].strip(), {})
+        elif current is not None and ":" in body:
+            key, _, val = body.partition(":")
+            try:
+                current[key.strip()] = float(val.strip())
+            except ValueError:
+                pass  # non-numeric lines such as "Bit depth"
+    return blocks
+
+
+def _noise_floor(blocks: dict[str, dict[str, float]]) -> tuple[float, float] | None:
+    """(noise floor dB, SNR dB) from per-channel quietest windows.
+
+    Silent channels (LFE, unused surrounds) are skipped, and the median of
+    the remaining channels is used.  A channel counts only if its quietest
+    window is well below its average, i.e. the sample contains pauses.
+    """
+    troughs: list[float] = []
+    snrs: list[float] = []
+    for name, vals in blocks.items():
+        if name == "Overall":
+            continue
+        rms, trough = vals.get("RMS level dB"), vals.get("RMS trough dB")
+        if rms is None or trough is None:
+            continue
+        if rms == float("-inf") or rms < SILENT_THRESHOLD_DB:
+            continue
+        if trough == float("-inf"):
+            trough = DIGITAL_SILENCE_DB
+        if rms - trough >= MIN_PAUSE_DEPTH_DB:
+            troughs.append(trough)
+            snrs.append(rms - trough)
+    if not troughs:
+        return None
+    return statistics.median(troughs), statistics.median(snrs)
+
+
+def analyze_audio_quality(path: Path, stream_index: int, duration: float,
+                          sample_rate: int = 0,
+                          check_bandwidth: bool = False,
+                          ) -> dict[str, float | None] | None:
+    """Estimate noise, clipping and band-limiting of one audio stream.
+
+    Single ffmpeg pass over a short sample: astats on the full signal and,
+    if check_bandwidth, on the signal above HF_CUTOFF_HZ.  Returns None on
+    failure.
+    """
+    start = max(0, duration * 0.3)
+    length = min(AUDIO_QUALITY_SAMPLE_SEC, duration - start)
+    if length < 5:
+        start = 0
+        length = min(AUDIO_QUALITY_SAMPLE_SEC, duration)
+    if length <= 0:
+        return None
+
+    with_hf = check_bandwidth and (
+        sample_rate == 0 or sample_rate / 2 > HF_CUTOFF_HZ * 1.1)
+    graph = f"[0:a:{stream_index}]"
+    if with_hf:
+        graph += (f"asplit[a][b];[a]astats@full[ao];"
+                  f"[b]highpass=f={HF_CUTOFF_HZ},astats@hf[bo]")
+    else:
+        graph += "astats@full[ao]"
+    # -ss/-t before -i limit the input, so every output sees the same span.
+    cmd = ["ffmpeg", "-v", "info", "-nostdin",
+           "-ss", str(int(start)), "-t", str(int(length)), "-i", str(path),
+           "-filter_complex", graph, "-map", "[ao]", "-f", "null", "-"]
+    if with_hf:
+        cmd += ["-map", "[bo]", "-f", "null", "-"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+    full_blocks = _astats_blocks(result.stderr, "full")
+    full = full_blocks.get("Overall", {})
+    rms = full.get("RMS level dB")
+    if rms is None:
+        return None
+
+    out: dict[str, float | None] = {
+        "snr_db": None, "noise_floor_db": None,
+        "clip_ratio": None, "hf_level_db": None,
+    }
+    noise = _noise_floor(full_blocks)
+    if noise is not None:
+        out["noise_floor_db"], out["snr_db"] = noise
+    peak = full.get("Peak level dB")
+    samples = full.get("Number of samples")
+    if peak is not None and peak > -0.5 and samples:
+        out["clip_ratio"] = full.get("Peak count", 0.0) / samples
+    else:
+        out["clip_ratio"] = 0.0
+
+    if with_hf:
+        hf = _astats_blocks(result.stderr, "hf").get("Overall", {}).get("RMS level dB")
+        if hf is not None and rms != float("-inf"):
+            out["hf_level_db"] = max(-200.0, hf) - rms
+    return out
+
+
+def detect_audio_quality(path: Path, vf: VideoFile, index: int | None) -> bool:
+    """Analyze audio quality of one track (the one scoring will use).
+
+    Skips tracks already analyzed (restored from cache).  Returns True if
+    new data was collected.
+    """
+    if index is None or not (0 <= index < len(vf.audio_tracks)):
+        return False
+    at = vf.audio_tracks[index]
+    if at.clip_ratio is not None:
+        return False
+    stats = analyze_audio_quality(path, index, at.duration or vf.duration,
+                                  at.sample_rate, check_bandwidth=at.is_lossless)
+    if stats is None:
+        return False
+    at.snr_db = stats["snr_db"]
+    at.noise_floor_db = stats["noise_floor_db"]
+    at.clip_ratio = stats["clip_ratio"]
+    at.hf_level_db = stats["hf_level_db"]
+    return True
+
+
 def probe_file(path: Path, use_cache: bool = True) -> VideoFile:
     """Extract full video file information."""
     from cache import get_cached, set_cached
@@ -459,10 +756,7 @@ def probe_file(path: Path, use_cache: bool = True) -> VideoFile:
         level = s.get("level", "")
         if isinstance(level, int) and level > 0:
             level = str(level / 10) if level > 9 else str(level)
-        # Extract encoder from stream or format tags
-        tags = s.get("tags", {})
-        encoder = (tags.get("encoder", "") or tags.get("ENCODER", "")
-                   or fmt.get("tags", {}).get("encoder", "")).strip()
+        encoder = detect_video_encoder(path, s.get("tags", {}), fmt.get("tags", {}))
 
         vf.video = VideoTrack(
             codec=s.get("codec_name", ""),
@@ -538,6 +832,16 @@ def probe_file(path: Path, use_cache: bool = True) -> VideoFile:
             forced=bool(disp.get("forced", 0)),
             default=bool(disp.get("default", 0)),
         ))
+
+    # Remaster markers in container/stream titles and comments
+    texts = [_lower_tags(fmt.get("tags")).get(k, "")
+             for k in ("title", "comment", "description")]
+    for stream in streams:
+        texts.append(_lower_tags(stream.get("tags")).get("title", ""))
+    for text in texts:
+        for hit in find_remaster_hits(text):
+            if hit not in vf.remaster_tag_hits:
+                vf.remaster_tag_hits.append(hit)
 
     # Save to cache
     if use_cache:

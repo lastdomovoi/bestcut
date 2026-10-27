@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from models import VideoFile
 from profiles import ScoringWeights
 
@@ -61,14 +63,15 @@ def score_resolution(vf: VideoFile) -> float:
     """Resolution score (0-30 points). 4K = 30, 1080p ~ 7.5, 720p ~ 3.3.
 
     Upscaled video is scored by its estimated real resolution.
+    3D video packed into one frame (SBS/top-bottom) is scored per eye.
     """
     if vf.video.is_upscaled and vf.video.real_height:
         # Use real resolution for scoring
         aspect = vf.video.width / vf.video.height if vf.video.height else 16 / 9
         real_w = int(vf.video.real_height * aspect)
-        real_pixels = real_w * vf.video.real_height
+        real_pixels = (real_w * vf.video.real_height) // vf.video.stereo_divisor
     else:
-        real_pixels = vf.video.pixels
+        real_pixels = vf.video.eye_pixels
     ref_pixels = 3840 * 2160  # 4K
     return min(30.0, (real_pixels / ref_pixels) * 30.0)
 
@@ -84,7 +87,6 @@ def score_video_quality(vf: VideoFile) -> float:
       BPP 0.03 → ~10,  0.05 → ~15,  0.08 → ~20,
       0.10 → ~22,  0.12 → ~23,  0.15 → ~24,  0.30 → ~25
     """
-    import math
     bpp = bits_per_pixel(vf)
     if bpp <= 0:
         return 0.0
@@ -110,6 +112,34 @@ def score_hdr(vf: VideoFile) -> float:
     return score
 
 
+def score_3d(vf: VideoFile) -> float:
+    """Small bonus (0-2) for 3D by format fidelity: MVC > full > half."""
+    v = vf.video
+    if not v.is_3d:
+        return 0.0
+    if v.stereo_mode == "mvc":
+        return 2.0
+    if v.stereo_mode in ("side_by_side", "top_bottom"):
+        return 1.5 if v.stereo_full_res else 1.0
+    return 0.5
+
+
+def score_remaster(vf: VideoFile) -> float:
+    """Bonus (0-3) for remastered/restored releases.
+
+    Needs explicit evidence (tags or filename); modern characteristics
+    (HEVC/AV1, 10-bit+, HDR/BT.2020, 4K) raise a confirmed remaster's
+    bonus but never create one.
+    """
+    if not vf.is_remaster:
+        return 0.0
+    v = vf.video
+    modern = (v.codec in ("hevc", "h265", "av1") or v.bit_depth >= 10
+              or bool(v.hdr_type) or v.color_primaries == "bt2020"
+              or v.height >= 2160)
+    return 3.0 if modern else 2.0
+
+
 def _audio_track_rank(a) -> tuple:
     """Audio track rank for sorting (higher = better)."""
     # Priority: Atmos > DTS:X > lossless > lossy
@@ -122,6 +152,53 @@ def _audio_track_rank(a) -> tuple:
     return (spatial, lossless, codec_rank, a.channels, a.bitrate)
 
 
+def select_best_audio(vf: VideoFile, primary_language: str = ""):
+    """Audio track used for quality scoring (primary language preferred)."""
+    if not vf.audio_tracks:
+        return None
+    pool = vf.audio_tracks
+    if primary_language:
+        pool = [at for at in pool if at.language == primary_language] or pool
+    return max(pool, key=_audio_track_rank)
+
+
+# Quietest window above this level is audible hiss; clipping share above
+# CLIP_RATIO_MIN is distortion; lossless content below BAND_LIMIT_HF_DB
+# (relative to overall RMS) above 16 kHz was probably transcoded from lossy.
+NOISE_FLOOR_MAX_DB = -50.0
+CLIP_RATIO_MIN = 1e-4
+BAND_LIMIT_HF_DB = -70.0
+
+
+def audio_quality_flags(a) -> list[str]:
+    """Human-readable quality problems of an analyzed audio track."""
+    flags = []
+    if a.noise_floor_db is not None and a.noise_floor_db > NOISE_FLOOR_MAX_DB:
+        flags.append(f"noisy {a.noise_floor_db:.0f} dB")
+    if a.clip_ratio is not None and a.clip_ratio > CLIP_RATIO_MIN:
+        flags.append(f"clipping {a.clip_ratio * 100:.2f}%")
+    if (a.hf_level_db is not None and a.is_lossless
+            and a.hf_level_db < BAND_LIMIT_HF_DB):
+        flags.append("band-limited <16kHz")
+    return flags
+
+
+def score_audio_quality(a) -> float:
+    """Penalty (<= 0, down to -5) for noisy, clipped or band-limited audio.
+
+    Tracks that were not analyzed are not penalized.
+    """
+    penalty = 0.0
+    if a.noise_floor_db is not None and a.noise_floor_db > NOISE_FLOOR_MAX_DB:
+        penalty += min(2.0, (a.noise_floor_db - NOISE_FLOOR_MAX_DB) / 15.0 * 2.0)
+    if a.clip_ratio is not None and a.clip_ratio > CLIP_RATIO_MIN:
+        penalty += min(2.0, 1.0 + math.log10(a.clip_ratio / CLIP_RATIO_MIN) * 0.5)
+    if (a.hf_level_db is not None and a.is_lossless
+            and a.hf_level_db < BAND_LIMIT_HF_DB):
+        penalty += 1.0
+    return -penalty
+
+
 def score_audio(vf: VideoFile, primary_language: str = "") -> float:
     """Audio score (0-25 points).
 
@@ -131,6 +208,7 @@ def score_audio(vf: VideoFile, primary_language: str = "") -> float:
     - Channels (0-4): surround sound
     - Bitrate (0-4): stream sufficiency
     - Multi-language (0-3): multiple language tracks
+    - Quality penalty (-5..0): noise, clipping, band-limiting (if analyzed)
 
     When primary_language is set, the best track in that language is used
     for quality scoring (spatial, codec, channels, bitrate).
@@ -138,16 +216,7 @@ def score_audio(vf: VideoFile, primary_language: str = "") -> float:
     if not vf.audio_tracks:
         return 0.0
 
-    # Best audio track — prefer primary language if configured
-    if primary_language:
-        primary_tracks = [at for at in vf.audio_tracks
-                          if at.language == primary_language]
-        if primary_tracks:
-            best = max(primary_tracks, key=_audio_track_rank)
-        else:
-            best = max(vf.audio_tracks, key=_audio_track_rank)
-    else:
-        best = max(vf.audio_tracks, key=_audio_track_rank)
+    best = select_best_audio(vf, primary_language)
 
     # Spatial audio (0-8)
     if best.has_atmos:
@@ -187,7 +256,9 @@ def score_audio(vf: VideoFile, primary_language: str = "") -> float:
     languages = {at.language for at in vf.audio_tracks if at.language}
     multi_score = min(3.0, len(languages) * 1.0)
 
-    return spatial_score + codec_score + channel_score + bitrate_score + multi_score
+    base = spatial_score + codec_score + channel_score + bitrate_score + multi_score
+    # The quality penalty alone never pushes the audio score below zero.
+    return base + max(score_audio_quality(best), -max(0.0, base))
 
 
 def score_subtitles(vf: VideoFile) -> float:
@@ -274,13 +345,16 @@ def calculate_score(vf: VideoFile, weights: ScoringWeights | None = None,
         "compatibility": vf.compatibility_score * weights.compatibility,
         "integrity": score_integrity(vf),  # penalties are not scaled
     }
+    if vf.video.is_3d:
+        components["stereo3d"] = score_3d(vf) * weights.stereo3d
+    if vf.is_remaster:
+        components["remaster"] = score_remaster(vf) * weights.remaster
 
     # Size efficiency penalty: penalize bloated files where extra size
     # doesn't translate to meaningful quality improvement.
     # Uses BPP efficiency: files with very high BPP (>0.12) get penalized
     # proportionally to their excess size vs a "reference" good encode.
     if vf.file_size_gb > 0 and vf.video.bitrate > 0:
-        import math
         bpp = bits_per_pixel(vf)
         if bpp > 0:
             # Reference BPP for "good enough" quality (codec-adjusted)
@@ -332,10 +406,13 @@ def score_breakdown(vf: VideoFile, weights: ScoringWeights | None = None,
         f"Compatibility (x{weights.compatibility})": vf.compatibility_score * weights.compatibility,
         "Integrity": score_integrity(vf),
     }
+    if vf.video.is_3d:
+        result[f"3D format (x{weights.stereo3d})"] = score_3d(vf) * weights.stereo3d
+    if vf.is_remaster:
+        result[f"Remaster (x{weights.remaster})"] = score_remaster(vf) * weights.remaster
 
     # Size efficiency (bloat penalty)
     if vf.file_size_gb > 0 and vf.video.bitrate > 0:
-        import math
         bpp = bits_per_pixel(vf)
         if bpp > 0:
             ref_bpp = 0.10

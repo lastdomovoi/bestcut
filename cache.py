@@ -15,13 +15,16 @@ from pathlib import Path
 
 from models import AudioTrack, IntegrityResult, SubtitleTrack, VideoFile, VideoTrack
 
+# Bump when probe output changes so stale entries are not reused.
+CACHE_VERSION = 2
+
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "bestcut"
 
 
 def _cache_key(path: Path) -> str:
     """Create cache key based on path, size and mtime."""
     stat = path.stat()
-    raw = f"{path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
+    raw = f"v{CACHE_VERSION}|{path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -40,6 +43,7 @@ def _serialize(vf: VideoFile) -> dict:
         "video": asdict(vf.video),
         "audio_tracks": [asdict(a) for a in vf.audio_tracks],
         "subtitle_tracks": [asdict(s) for s in vf.subtitle_tracks],
+        "remaster_tag_hits": vf.remaster_tag_hits,
     }
 
 
@@ -62,6 +66,7 @@ def _deserialize(data: dict) -> VideoFile:
         video=_safe_construct(VideoTrack, data["video"]),
         audio_tracks=[_safe_construct(AudioTrack, a) for a in data["audio_tracks"]],
         subtitle_tracks=[_safe_construct(SubtitleTrack, s) for s in data["subtitle_tracks"]],
+        remaster_tag_hits=list(data.get("remaster_tag_hits", [])),
     )
     return vf
 

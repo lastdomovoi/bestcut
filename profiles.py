@@ -19,6 +19,8 @@ class ScoringWeights:
     subtitles: float = 1.0        # Subtitles
     compatibility: float = 1.0    # Device compatibility
     file_size: float = 1.0        # Size efficiency (penalizes bloated encodes)
+    stereo3d: float = 1.0         # 3D format fidelity bonus
+    remaster: float = 1.0         # Remastered/restored release bonus
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -29,6 +31,8 @@ class ScoringWeights:
             "subtitles": self.subtitles,
             "compatibility": self.compatibility,
             "file_size": self.file_size,
+            "stereo3d": self.stereo3d,
+            "remaster": self.remaster,
         }
 
 
@@ -47,6 +51,7 @@ PROFILES: dict[str, tuple[str, ScoringWeights]] = {
             audio=1.2,
             compatibility=0.3,
             file_size=0.0,
+            remaster=1.5,
         ),
     ),
     "atmos": (
@@ -107,6 +112,7 @@ PROFILES: dict[str, tuple[str, ScoringWeights]] = {
             subtitles=1.0,
             compatibility=0.2,
             file_size=0.0,
+            remaster=1.5,
         ),
     ),
 }
@@ -155,5 +161,5 @@ def list_profiles() -> str:
     lines.append("")
     lines.append("Custom weights: --weights 'resolution=1.5,audio=2.0,file_size=1.0'")
     lines.append("Available keys: resolution, video_quality, hdr, audio, subtitles, "
-                  "compatibility, file_size")
+                  "compatibility, file_size, stereo3d, remaster")
     return "\n".join(lines)
