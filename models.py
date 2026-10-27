@@ -297,3 +297,12 @@ class VideoFile:
         if h:
             return f"{h}:{m:02d}:{s:02d}"
         return f"{m}:{s:02d}"
+
+    @property
+    def display_name(self) -> str:
+        """Human-friendly name showing release folder if filename is generic (e.g. 00000.m2ts)."""
+        if self.path.stem.isdigit() and len(self.path.parents) >= 3:
+            for p in self.path.parents:
+                if p.name.upper() not in ("STREAM", "BDMV", "VIDEO_TS", "ADV_OBJ"):
+                    return f"{p.name}/{self.path.name}"
+        return self.path.name

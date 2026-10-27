@@ -10,8 +10,8 @@ from models import VideoFile
 
 # Patterns for extracting season/episode (in priority order)
 EPISODE_PATTERNS = [
-    # S01E01, S1E1, s01e01
-    re.compile(r'[Ss](\d{1,3})[Ee](\d{1,3})'),
+    # S01E01, S1E1, s01e01, S01.E01, S01_E01, S2_E05, S1 E1
+    re.compile(r'[Ss](\d{1,3})[._\-\s]*[Ee](\d{1,3})'),
     # 1x01, 01x01
     re.compile(r'(\d{1,2})[xX](\d{1,3})'),
     # Season 1 Episode 01
@@ -57,7 +57,7 @@ def normalize_title(filename: str) -> str:
 
     # Cut everything after season/episode marker
     cut_patterns = [
-        r'[Ss]\d{1,3}[Ee]',
+        r'[Ss]\d{1,3}[._\-\s]*[Ee]',
         r'\d{1,2}[xX]\d{1,3}',
         r'[Ss]eason\s*\d',
         r'\s-\s\d{2,3}(?:\s|\.|\[|$)',
@@ -152,11 +152,25 @@ def group_episodes(files: list[VideoFile]) -> dict[str, dict[tuple[int | None, i
     for vf in files:
         fname = vf.path.name
         season, episode = parse_episode(fname)
+        title_source = fname
+
+        # If file itself has no episode info (e.g. BDMV/STREAM/00000.m2ts),
+        # inspect parent directory names up the tree
+        if episode is None:
+            for parent in vf.path.parents:
+                if parent.name in ("", "/", "Volumes", "Torrents", "video", "Projects"):
+                    break
+                p_season, p_episode = parse_episode(parent.name)
+                if p_episode is not None:
+                    season, episode = p_season, p_episode
+                    title_source = parent.name
+                    break
+
         vf.season = season
         vf.episode = episode
 
         if episode is not None:
-            title = normalize_title(fname)
+            title = normalize_title(title_source)
             vf.series_title = title
         else:
             # For standalone movies — use filename
