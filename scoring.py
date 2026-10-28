@@ -45,6 +45,16 @@ AUDIO_CODEC_RANK = {
 }
 
 
+def rank_key(vf: VideoFile) -> tuple:
+    """Sort key (higher = better): a damaged file never outranks an
+    undamaged one, whatever its score."""
+    return (not vf.integrity.damaged, vf.score)
+
+
+def ranked_files(files: list[VideoFile]) -> list[VideoFile]:
+    return sorted(files, key=rank_key, reverse=True)
+
+
 def effective_bitrate(vf: VideoFile) -> float:
     """Calculate effective bitrate (normalized by codec efficiency)."""
     efficiency = CODEC_EFFICIENCY.get(vf.video.codec, 1.0)
@@ -52,8 +62,12 @@ def effective_bitrate(vf: VideoFile) -> float:
 
 
 def bits_per_pixel(vf: VideoFile) -> float:
-    """Bits per pixel per frame — resolution-independent quality metric."""
-    pixels = vf.video.pixels
+    """Bits per pixel per frame — resolution-independent quality metric.
+
+    Counted over the active picture: black bars cost almost no bits and
+    would otherwise inflate resolution and dilute BPP.
+    """
+    pixels = vf.video.active_pixels
     fps = vf.video.fps
     if pixels == 0 or fps == 0:
         return 0.0

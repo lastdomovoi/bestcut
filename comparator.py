@@ -7,12 +7,13 @@ from pathlib import Path
 
 from models import VideoFile
 from profiles import ScoringWeights
-from scoring import audio_quality_flags, bits_per_pixel, effective_bitrate, score_breakdown
+from scoring import (audio_quality_flags, bits_per_pixel, effective_bitrate,
+                     rank_key, ranked_files, score_breakdown)
 
 
 def compare_pair(a: VideoFile, b: VideoFile) -> dict:
     """Compare two video files and determine the winner."""
-    winner_abs = a if a.score > b.score else b
+    winner_abs = a if rank_key(a) > rank_key(b) else b
     loser_abs = b if winner_abs is a else a
 
     # Efficiency: quality per gigabyte
@@ -30,6 +31,7 @@ def compare_pair(a: VideoFile, b: VideoFile) -> dict:
         "efficiency_a": eff_a,
         "efficiency_b": eff_b,
         "score_diff": abs(a.score - b.score),
+        "damage_decided": a.integrity.damaged != b.integrity.damaged,
         "size_diff_mb": abs(a.file_size - b.file_size) / (1024 ** 2),
     }
 
@@ -69,7 +71,7 @@ def format_file_info(vf: VideoFile, verbose: bool = False, weights: ScoringWeigh
         lines.append(
             f"  Audio #{i + 1}: {at.format_label} {at.channel_label} "
             f"({at.channels}ch) | {br_kbps:.0f} kbps | "
-            f"{lang}{spatial_str}{lossless_str}{title_str} {_audio_quality_label(at)}".rstrip()
+            f"{lang}{spatial_str}{lossless_str}{title_str} {_audio_quality_label(at)} {_channel_note(at)}".rstrip()
         )
 
     for w in vf.metadata_warnings:
@@ -141,7 +143,9 @@ def format_comparison(comp: dict, verbose: bool = False) -> str:
     winner = comp["absolute_winner"]
     loser = a if winner is b else b
 
-    if comp["score_diff"] < 2.0:
+    if comp.get("damage_decided"):
+        lines.append(f"Best: {winner.path.name} (the other version is damaged)")
+    elif comp["score_diff"] < 2.0:
         lines.append(f"Result: roughly equal (difference {comp['score_diff']:.1f})")
     else:
         lines.append(
@@ -330,6 +334,17 @@ def _audio_quality_label(at) -> str:
     return f"[{', '.join(flags)}]" if flags else ""
 
 
+def _channel_note(at) -> str:
+    """Channel analysis remarks (duplicates, matrixing, uncertainty)."""
+    notes = [n for n in at.channel_notes if "independent channels" not in n]
+    if not notes and at.channels > 1 and at.channel_confidence and at.real_channels is None:
+        notes = ["channels not verified"]
+    if not notes:
+        return ""
+    conf = f" ({at.channel_confidence} confidence)" if at.channel_confidence and at.real_channels is not None else ""
+    return f"<{'; '.join(notes)}{conf}>"
+
+
 def _audio_tracks_detail(vf: VideoFile) -> list[str]:
     """List of all audio tracks as formatted strings."""
     lines = []
@@ -351,6 +366,9 @@ def _audio_tracks_detail(vf: VideoFile) -> list[str]:
         quality = _audio_quality_label(at)
         if quality:
             parts.append(quality)
+        note = _channel_note(at)
+        if note:
+            parts.append(note)
         lines.append(" ".join(parts))
     return lines
 
@@ -397,7 +415,7 @@ def format_group_comparison(
         return "\n".join(lines)
 
     # Sort by score
-    ranked = sorted(files, key=lambda f: f.score, reverse=True)
+    ranked = ranked_files(files)
 
     # Build comparison table
     v_br = lambda vf: f"{vf.video.bitrate / 1_000_000:.1f}" if vf.video.bitrate else "?"
@@ -548,7 +566,13 @@ def format_group_comparison(
         lines.append(f"  (only version)")
         return "\n".join(lines)
     diff = best.score - ranked[1].score
-    if diff < 2.0:
+    if best.integrity.damaged:
+        lines.append(f"  {_RED}!! Every version is damaged — none can be recommended; "
+                     f"recover or re-download{_RESET}")
+    elif ranked[1].integrity.damaged:
+        lines.append(f"  {_GREEN}{_BOLD}Recommendation: {best.display_name}{_RESET} "
+                     f"(the other version is damaged)")
+    elif diff < 2.0:
         lines.append(f"  Result: roughly equal (difference {diff:.1f})")
     else:
         lines.append(f"  {_GREEN}{_BOLD}Recommendation: {best.display_name} (+{diff:.1f} pts){_RESET}")
@@ -615,6 +639,19 @@ def _summarize_differences(ranked: list[VideoFile]) -> list[str]:
         # HDR
         if best.video.hdr_type != other.video.hdr_type:
             diffs.append(f"HDR: {best.video.hdr_type or 'SDR'} vs {other.video.hdr_type or 'SDR'}")
+
+        # Active picture geometry (black bars do not count as resolution)
+        ba, oa = best.video, other.video
+        if (ba.active_width, ba.active_height) != (oa.active_width, oa.active_height) \
+                and (ba.has_black_bars or oa.has_black_bars):
+            diffs.append(
+                f"Active picture: {ba.active_width}x{ba.active_height} vs "
+                f"{oa.active_width}x{oa.active_height} (encoded "
+                f"{ba.width}x{ba.height} vs {oa.width}x{oa.height}) — "
+                f"compare the images by eye")
+        if ba.crop_uncertain or oa.crop_uncertain:
+            diffs.append("Black-bar geometry unreliable (scenes disagree): "
+                         "treat picture-size scoring as uncertain")
 
         # Aspect ratio / black bars
         if best.video.has_black_bars != other.video.has_black_bars:
@@ -715,6 +752,8 @@ def export_json(files: list[VideoFile], cfg=None) -> str:
                     "profile": at.profile,
                     "channels": at.channels,
                     "real_channels": at.real_channels,
+                    "channel_confidence": at.channel_confidence,
+                    "channel_notes": at.channel_notes,
                     "snr_db": at.snr_db,
                     "noise_floor_db": at.noise_floor_db,
                     "clip_ratio": at.clip_ratio,

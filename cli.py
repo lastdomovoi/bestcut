@@ -31,7 +31,7 @@ from probe import (detect_3d, detect_all_real_channels, detect_audio_quality,
                     detect_crop_and_upscale, detect_remaster, detect_source_type,
                     measure_picture, probe_file)
 from profiles import ScoringWeights, get_profile, list_profiles, parse_custom_weights
-from scoring import calculate_score, select_best_audio
+from scoring import calculate_score, rank_key, ranked_files, select_best_audio
 
 
 def process_file(
@@ -75,7 +75,7 @@ def process_file(
     if check_integrity == "quick":
         vf.integrity = check_quick(path)
     elif check_integrity == "full":
-        vf.integrity = check_full(path)
+        vf.integrity = check_full(path, vf.duration)
 
     # Stream duration sync (quick check, always)
     sync_issues = check_duration_sync(vf)
@@ -146,13 +146,17 @@ def cmd_compare(args: argparse.Namespace) -> int:
     if args.check:
         check_mode = "full" if args.full_check else "quick"
         log.write(f"Integrity check: {'full' if check_mode == 'full' else 'quick'}\n")
+    if args.recommend_delete and check_mode != "full":
+        # Deletion advice is only valid for fully decoded, verified files.
+        check_mode = "full"
+        log.write("Integrity check: full (required for deletion advice)\n")
 
     # Process files
     video_files: list[VideoFile] = []
     total = len(all_files)
 
-    if total >= 4 and not check_mode.endswith("full"):
-        # Parallel processing for 4+ files (unless full check)
+    if total >= 4:
+        # Parallel processing for 4+ files
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import os
 
@@ -247,12 +251,14 @@ def cmd_compare(args: argparse.Namespace) -> int:
             for ep_key, files in episodes.items():
                 if len(files) < 2:
                     continue
-                ranked = sorted(files, key=lambda f: f.score, reverse=True)
+                ranked = ranked_files(files)
                 best = ranked[0]
                 second = ranked[1]
 
                 # Simple stats: count by paths (first vs second argument)
-                if best.score - second.score < 2.0:
+                decisive = (not best.integrity.damaged and (
+                    second.integrity.damaged or best.score - second.score >= 2.0))
+                if not decisive:
                     ties += 1
                 else:
                     # Determine by parent directory
@@ -305,6 +311,8 @@ def deletion_candidates(groups: dict, primary_language: str = ""):
     """Split groups into (keep, delete, review) lists.
 
     review: [(reason, files)] for groups that need a human decision.
+    A file is deleted only against a fully decoded, error-free keeper; a
+    damaged file with no such replacement is never offered for deletion.
     """
     to_keep: list[VideoFile] = []
     to_delete: list[VideoFile] = []
@@ -317,10 +325,33 @@ def deletion_candidates(groups: dict, primary_language: str = ""):
             if reason:
                 review.append((reason, files))
                 continue
-            ranked = sorted(files, key=lambda f: f.score, reverse=True)
-            to_keep.append(ranked[0])
-            to_delete.extend(ranked[1:])
+            ranked = ranked_files(files)
+            keeper = ranked[0]
+            if not keeper.integrity.verified_clean:
+                review.append(("no verified-clean copy (full integrity check "
+                               "needed; damaged files need recovery or "
+                               "re-download)", files))
+                continue
+            deletable = [f for f in ranked[1:] if f.integrity.full_checked]
+            unverified = [f for f in ranked[1:] if not f.integrity.full_checked]
+            if unverified:
+                review.append(("copies not fully verified: " + ", ".join(
+                    f.path.name for f in unverified), unverified))
+            if deletable:
+                to_keep.append(keeper)
+                to_delete.extend(deletable)
     return to_keep, to_delete, review
+
+
+def damaged_without_replacement(groups: dict) -> list[VideoFile]:
+    """Damaged files that have no fully verified clean counterpart."""
+    result = []
+    for episodes in groups.values():
+        for files in episodes.values():
+            has_clean = any(f.integrity.verified_clean for f in files)
+            if not has_clean:
+                result.extend(f for f in files if f.integrity.damaged)
+    return result
 
 
 def _print_delete_recommendations(
@@ -329,6 +360,19 @@ def _print_delete_recommendations(
 ) -> None:
     """Print deletion recommendations for worst duplicates."""
     to_keep, to_delete, review = deletion_candidates(groups, primary_language)
+
+    broken = damaged_without_replacement(groups)
+    if broken:
+        print(f"\n{'=' * 70}")
+        print(" DAMAGED — RECOVER OR RE-DOWNLOAD (kept, never offered for deletion)")
+        print(f"{'=' * 70}")
+        for vf in broken:
+            ig = vf.integrity
+            when = ""
+            if ig.first_error_time is not None:
+                when = f", errors {ig.first_error_time:.0f}s–{ig.last_error_time:.0f}s"
+            kind = "truncated" if ig.is_truncated else f"{ig.error_count} errors"
+            print(f"  ! {vf.path}  [{kind}; {', '.join(ig.streams_affected()) or 'file'}{when}]")
 
     if review:
         print(f"\n{'=' * 70}")
@@ -405,6 +449,12 @@ def cmd_check(args: argparse.Namespace) -> int:
                     print(f" {vf.integrity.error_count} ERRORS")
                     if vf.integrity.is_truncated:
                         print(f"  ⚠ FILE TRUNCATED")
+                    ig = vf.integrity
+                    if ig.issues:
+                        span = ""
+                        if ig.first_error_time is not None:
+                            span = f", {ig.first_error_time:.0f}s–{ig.last_error_time:.0f}s"
+                        print(f"  affected: {', '.join(ig.streams_affected())}{span}")
                     for err in vf.integrity.errors:
                         print(f"  - {err}")
 

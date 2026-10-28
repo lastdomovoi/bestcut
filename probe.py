@@ -8,6 +8,7 @@ import statistics
 import subprocess
 from pathlib import Path
 
+from channels import analyze_channels
 from procutil import run_tool
 from models import AudioTrack, SubtitleTrack, VideoFile, VideoTrack
 
@@ -15,8 +16,6 @@ from models import AudioTrack, SubtitleTrack, VideoFile, VideoTrack
 # Channels with RMS below this threshold are considered silent.
 SILENT_THRESHOLD_DB = -70.0
 
-# If two channels differ by less than this, they carry the same signal.
-IDENTICAL_THRESHOLD_DB = 1.0
 
 
 def _run_ffprobe(path: Path, *extra_args: str) -> dict:
@@ -282,80 +281,70 @@ def _detect_dtsx(stream: dict) -> bool:
 
 def detect_real_channels(path: Path, stream_index: int, channels: int,
                          duration: float) -> int | None:
-    """Detect actual number of active audio channels via RMS analysis.
+    """Real number of independent channels, or None if undetermined.
 
-    Samples 60 seconds from ~30% into the file to skip intros.
-    Returns the real channel count, or None if detection fails.
+    Thin wrapper over channels.analyze_channels (multi-scene energy plus
+    inter-channel correlation).
     """
-    if channels <= 1:
-        return None  # Already mono, nothing to detect
+    return analyze_channels(path, stream_index, channels, duration).real_channels
 
-    # Sample from 30% into the file, 60 seconds
-    start = max(0, duration * 0.3)
-    sample_duration = min(60, duration - start)
-    if sample_duration < 5:
-        start = 0
-        sample_duration = min(60, duration)
 
-    cmd = [
-        "ffmpeg", "-v", "info",
-        "-ss", str(int(start)),
-        "-i", str(path),
-        "-t", str(int(sample_duration)),
-        "-map", f"0:a:{stream_index}",
-        "-af", "astats=metadata=1:reset=0",
-        "-f", "null", "-",
-    ]
-    try:
-        result = run_tool(cmd, timeout=120)
-    except (subprocess.TimeoutExpired, OSError):
+# Black-bar detection samples this many places, a few seconds each.
+CROP_POINTS = (0.1, 0.25, 0.4, 0.55, 0.7, 0.85)
+CROP_SAMPLE_SEC = 4
+
+# A sample agrees with the final crop when both sides are within this share.
+CROP_AGREE = 0.015
+# Share of usable samples that must agree for the crop to be trusted.
+CROP_MIN_AGREEMENT = 0.5
+
+
+def stable_crop(samples: list[tuple[int, int]]) -> tuple[int, int] | None:
+    """Combine per-sample crop boxes into one stable (width, height).
+
+    Each sample is the content box one scene shows.  Dark scenes give
+    too-small boxes and burned-in subtitles or logos too-large ones, so
+    neither extreme is taken: the largest group of agreeing boxes wins.
+    It is trusted only if it covers enough samples and is not tied with a
+    different group (e.g. mixed aspect ratios); otherwise None.
+    """
+    valid = [(w, h) for w, h in samples if w >= 16 and h >= 16]
+    if len(valid) < 2:
         return None
 
-    stderr = result.stderr
-    # Parse per-channel RMS levels from the final astats output.
-    # astats prints "RMS level dB" per channel, then "Overall".
-    rms_pattern = re.compile(r"RMS level dB:\s*([-\d.]+|inf|-inf)")
-    all_rms = rms_pattern.findall(stderr)
-    if not all_rms:
+    def near(a, b):
+        return (abs(a[0] - b[0]) <= max(a[0], b[0]) * CROP_AGREE
+                and abs(a[1] - b[1]) <= max(a[1], b[1]) * CROP_AGREE)
+
+    groups = [[v for v in valid if near(v, c)] for c in valid]
+    best = max(groups, key=lambda g: (len(g), g[0][0] * g[0][1]))
+    if len(best) / len(valid) < CROP_MIN_AGREEMENT:
         return None
+    # A different group of the same size makes the answer ambiguous
+    for g in groups:
+        if len(g) == len(best) and not near(g[0], best[0]):
+            return None
+    return max(v[0] for v in best), max(v[1] for v in best)
 
-    # Take the last (channels + 1) values: per-channel + overall
-    # We only need the per-channel values.
-    tail = all_rms[-(channels + 1):]
-    if len(tail) < channels + 1:
-        tail = all_rms[-channels:] if len(all_rms) >= channels else all_rms
 
-    ch_rms: list[float] = []
-    for val in tail[:channels]:
+def measure_crop(path: Path, vf: VideoFile) -> tuple[int, int] | None:
+    """Active picture size from several scenes, or None if unreliable."""
+    if vf.duration <= 0:
+        return None
+    samples: list[tuple[int, int]] = []
+    for point in CROP_POINTS:
+        cmd = ["ffmpeg", "-v", "info", "-nostdin", "-an", "-sn",
+               "-ss", str(int(vf.duration * point)), "-t", str(CROP_SAMPLE_SEC),
+               "-i", str(path), "-map", "0:v:0",
+               "-vf", "cropdetect=24:2:0", "-f", "null", "-"]
         try:
-            db = float(val)
-            # Treat inf/-inf as silence
-            if db == float("inf") or db == float("-inf"):
-                db = -200.0
-        except ValueError:
-            db = -200.0
-        ch_rms.append(db)
-
-    if len(ch_rms) < channels:
-        return None
-
-    # Count active (non-silent) channels
-    active = [i for i, db in enumerate(ch_rms) if db > SILENT_THRESHOLD_DB]
-
-    if len(active) == 0:
-        return 1  # All silent — treat as mono
-
-    if len(active) == 1:
-        return 1  # Only one channel has signal — mono
-
-    if len(active) == 2:
-        # Check if two active channels carry the same signal (mono→stereo)
-        db_a, db_b = ch_rms[active[0]], ch_rms[active[1]]
-        if abs(db_a - db_b) < IDENTICAL_THRESHOLD_DB:
-            return 1  # Same signal in both — effectively mono
-        return 2  # True stereo
-
-    return len(active)
+            result = run_tool(cmd, timeout=60)
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+        lines = re.findall(r"crop=(\d+):(\d+):\d+:\d+", result.stderr)
+        if lines:  # last value of a sample is its most settled one
+            samples.append((int(lines[-1][0]), int(lines[-1][1])))
+    return stable_crop(samples)
 
 
 def detect_crop_and_upscale(path: Path, vf: VideoFile) -> None:
@@ -365,31 +354,10 @@ def detect_crop_and_upscale(path: Path, vf: VideoFile) -> None:
     vf.video.is_upscaled and vf.video.real_height.
     """
     height = vf.video.height
-    duration = vf.duration
 
-    # Sample from 40% into the file to avoid intros/credits
-    start = max(0, int(duration * 0.4))
-
-    # cropdetect — find actual content boundaries
-    cmd = [
-        "ffmpeg", "-v", "info",
-        "-ss", str(start),
-        "-i", str(path),
-        "-t", "10",
-        "-map", "0:v:0",
-        "-vf", "cropdetect=24:2:0",
-        "-f", "null", "-",
-    ]
-    try:
-        result = run_tool(cmd, timeout=60)
-        crop_lines = re.findall(r"crop=(\d+):(\d+):\d+:\d+", result.stderr)
-        if crop_lines:
-            # Take last (most stable) crop value
-            crop_w, crop_h = int(crop_lines[-1][0]), int(crop_lines[-1][1])
-            vf.video.crop_width = crop_w
-            vf.video.crop_height = crop_h
-    except (subprocess.TimeoutExpired, OSError):
-        pass
+    crop = measure_crop(path, vf)
+    vf.video.crop_uncertain = crop is None
+    vf.video.crop_width, vf.video.crop_height = crop if crop else (None, None)
 
     # Upscale detection via BPP heuristic
     if height <= 480:
@@ -666,7 +634,10 @@ def detect_all_real_channels(path: Path, vf: VideoFile) -> None:
         if at.channels <= 1:
             continue
         dur = at.duration or vf.duration
-        at.real_channels = detect_real_channels(path, i, at.channels, dur)
+        analysis = analyze_channels(path, i, at.channels, dur)
+        at.real_channels = analysis.real_channels
+        at.channel_confidence = analysis.confidence
+        at.channel_notes = analysis.notes
 
 
 # --- Audio quality -----------------------------------------------------

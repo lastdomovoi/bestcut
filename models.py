@@ -29,6 +29,7 @@ class VideoTrack:
     real_height: int | None = None  # Estimated real resolution if upscaled
     crop_width: int | None = None   # Actual content width (without black bars)
     crop_height: int | None = None  # Actual content height (without black bars)
+    crop_uncertain: bool = False    # crop samples disagreed; geometry not trusted
     duration: float = 0.0
     # Picture measurements (None = not measured)
     detail_psnr: float | None = None  # PSNR vs. half-res round trip; high = no fine detail
@@ -86,6 +87,23 @@ class VideoTrack:
         return self.width * self.height
 
     @property
+    def active_width(self) -> int:
+        """Width of the real picture; encoded black bars are not content."""
+        if self.has_black_bars and self.crop_width:
+            return self.crop_width
+        return self.width
+
+    @property
+    def active_height(self) -> int:
+        if self.has_black_bars and self.crop_height:
+            return self.crop_height
+        return self.height
+
+    @property
+    def active_pixels(self) -> int:
+        return self.active_width * self.active_height
+
+    @property
     def stereo_divisor(self) -> int:
         """How many views are packed into one frame (2 for SBS/top-bottom)."""
         if self.is_3d and self.stereo_mode in ("side_by_side", "top_bottom"):
@@ -95,14 +113,14 @@ class VideoTrack:
     @property
     def eye_width(self) -> int:
         if self.is_3d and self.stereo_mode == "side_by_side":
-            return self.width // 2
-        return self.width
+            return self.active_width // 2
+        return self.active_width
 
     @property
     def eye_height(self) -> int:
         if self.is_3d and self.stereo_mode == "top_bottom":
-            return self.height // 2
-        return self.height
+            return self.active_height // 2
+        return self.active_height
 
     @property
     def eye_pixels(self) -> int:
@@ -160,7 +178,9 @@ class AudioTrack:
     has_atmos: bool = False  # Dolby Atmos (TrueHD Atmos / EAC3 JOC)
     has_dtsx: bool = False   # DTS:X
     is_lossless: bool = False  # TrueHD, DTS-HD MA, FLAC, PCM
-    real_channels: int | None = None  # Actual active channels (detected via RMS analysis)
+    real_channels: int | None = None  # Independent channels (None = no reliable verdict)
+    channel_confidence: str = ""      # "low" | "medium" | "high" once analyzed
+    channel_notes: list[str] = field(default_factory=list)  # duplicates, phase, matrixing
     # Quality analysis (ffmpeg astats); None = not analyzed
     snr_db: float | None = None           # RMS level minus quietest-window RMS
     noise_floor_db: float | None = None   # RMS of the quietest window
@@ -245,16 +265,44 @@ class SubtitleTrack:
 
 
 @dataclass
+class IntegrityIssue:
+    stream: str            # "video", "audio", "container" or "unknown"
+    message: str
+    time: float | None = None  # playback position (s) when it was reported
+
+
+@dataclass
 class IntegrityResult:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     is_truncated: bool = False
     error_count: int = 0
     checked: bool = False
+    full_checked: bool = False  # whole file was decoded
+    timestamp_issues: int = 0   # non-monotonic timestamps (flagged, not corruption)
+    issues: list[IntegrityIssue] = field(default_factory=list)  # capped sample
 
     @property
     def is_ok(self) -> bool:
         return self.checked and self.error_count == 0 and not self.is_truncated
+
+    @property
+    def damaged(self) -> bool:
+        """Confirmed media corruption or truncation."""
+        return self.checked and (self.error_count > 0 or self.is_truncated)
+
+    @property
+    def verified_clean(self) -> bool:
+        """The whole file decoded without a single error."""
+        return self.full_checked and not self.damaged
+
+    # Maintained for every error, not derived from the capped issue sample
+    first_error_time: float | None = None
+    last_error_time: float | None = None
+    affected_streams: list[str] = field(default_factory=list)
+
+    def streams_affected(self) -> list[str]:
+        return sorted(self.affected_streams)
 
 
 @dataclass

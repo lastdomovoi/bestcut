@@ -38,3 +38,17 @@ def run_tool(cmd: list[str], timeout: float) -> ToolResult:
     out, out_note = decode_text(proc.stdout or b"")
     err, err_note = decode_text(proc.stderr or b"")
     return ToolResult(proc.returncode, out, err, out_note or err_note)
+
+
+@dataclass
+class BytesResult:
+    returncode: int
+    stdout: bytes
+    stderr: str
+
+
+def run_tool_bytes(cmd: list[str], timeout: float) -> BytesResult:
+    """Like run_tool, but stdout (e.g. raw PCM) is returned undecoded."""
+    proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    err, _ = decode_text(proc.stderr or b"")
+    return BytesResult(proc.returncode, proc.stdout or b"", err)
