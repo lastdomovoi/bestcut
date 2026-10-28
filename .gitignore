@@ -6,3 +6,4 @@ CLAUDE.md
 .remember/
 config.toml
 .worktrees/
+language_overrides.json

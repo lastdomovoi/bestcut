@@ -41,7 +41,9 @@ def _serialize(vf: VideoFile) -> dict:
         "duration": vf.duration,
         "overall_bitrate": vf.overall_bitrate,
         "video": asdict(vf.video),
-        "audio_tracks": [asdict(a) for a in vf.audio_tracks],
+        # user confirmations live in their own store, never in the cache
+        "audio_tracks": [{k: v for k, v in asdict(a).items() if k != "language_override"}
+                         for a in vf.audio_tracks],
         "subtitle_tracks": [asdict(s) for s in vf.subtitle_tracks],
         "metadata_warnings": vf.metadata_warnings,
     }

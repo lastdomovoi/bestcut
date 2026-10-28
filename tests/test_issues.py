@@ -184,10 +184,16 @@ class EpisodeTests(unittest.TestCase):  # issue #3
         self.assertEqual(parse_absolute_episode("Interny.s10e01.(181)XviD.[tahiy].avi"), 181)
         self.assertEqual(normalize_title("Интерны. Сезон №4. Серия №071.avi"), "интерны")
 
+    def test_resolution_in_brackets_is_not_an_absolute_number(self):
+        for n in (480, 576, 720, 1080):
+            self.assertIsNone(parse_absolute_episode(f"Show.S01E05.({n}).mkv"))
+        self.assertEqual(parse_absolute_episode("Show.S10E01.(240).mkv"), 240)
+
     def test_year_and_resolution_are_not_absolute(self):
         self.assertIsNone(parse_absolute_episode("Show.S01E02.(2019).mkv"))
         self.assertIsNone(parse_absolute_episode("Show S01E01 (1080).mkv"))
-        self.assertIsNone(parse_absolute_episode("Сезон 1 Серия 100.mkv"))
+        self.assertEqual(parse_absolute_episode("Сезон 1 Серия 100.mkv"), 100)  # 3+ digits: series-wide
+        self.assertIsNone(parse_absolute_episode("Сезон 1 Серия 12.mkv"))
         self.assertEqual(parse_episode("Сезон_4_Серия_12.mkv"), (4, 12))
         self.assertEqual(normalize_title("шоу сезон 4 серия 12.mkv"), "шоу")
 
@@ -207,6 +213,38 @@ class EpisodeTests(unittest.TestCase):  # issue #3
         _, delete, review = cli.deletion_candidates({"t": {(None, None): [a, b]}})
         self.assertEqual(delete, [])
         self.assertTrue(review)
+
+    def test_season_in_title_tail_format(self):
+        n = "Interny-13.(01.seriya).2015.WEB-DL.(720p).MediaClub.mkv"
+        self.assertEqual(parse_episode(n), (13, 1))
+        self.assertEqual(normalize_title(n), "interny")
+
+    def test_278_episode_series_resolves_to_real_identities(self):
+        seasons = [20] * 13 + [18]           # 278 episodes
+        files, absolute = [], 0
+        for s, count in enumerate(seasons, 1):
+            for e in range(1, count + 1):
+                absolute += 1
+                files += [
+                    make_vf(f"Интерны. Сезон №{s}. Серия №{absolute:03d}.avi", "/video"),
+                    make_vf(f"Interny.s{s:02d}e{e:02d}.({absolute})XviD.[tahiy].avi", "/torrents/x"),
+                    make_vf(f"Interny-{s}.({e:02d}.seriya).2015.WEB-DL.(720p).MediaClub.mkv", "/torrents/y"),
+                ]
+        groups = group_episodes(files)
+        keys = [(k, len(v)) for eps in groups.values() for k, v in eps.items()]
+        self.assertEqual(len(keys), 278)
+        self.assertTrue(all(n == 3 for _, n in keys), [k for k in keys if k[1] != 3][:5])
+        self.assertEqual(sorted(k for (k, _) in keys), [(None, i) for i in range(1, 279)])
+        _, delete, _ = cli.deletion_candidates(groups, comparer=None)
+        # every deletion candidate shares a proven episode with its keeper
+        self.assertEqual(len(delete), 278 * 2)
+
+    def test_unreconcilable_numbering_never_merges_different_episodes(self):
+        a = make_vf("Интерны. Сезон №4. Серия №071.avi", "/video")
+        c = make_vf("Interny-13.(01.seriya).2015.mkv", "/y")      # no offset table
+        groups = group_episodes([a, c])
+        sizes = sorted(len(v) for eps in groups.values() for v in eps.values())
+        self.assertEqual(sizes, [1, 1])
 
     def test_existing_patterns(self):
         self.assertEqual(parse_episode("Show.S01E02.mkv"), (1, 2))
@@ -657,3 +695,142 @@ class BlackBarTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------- issue #2 (rest)
+from languages import (OverrideStoreError, apply_overrides,  # noqa: E402
+                       language_label, resolve_language, save_override, title_hint)
+
+
+class LanguageEvidenceTests(unittest.TestCase):
+    def track(self, lang="", title="", override=""):
+        return AudioTrack(codec="ac3", channels=2, language=lang, title=title,
+                          language_override=override)
+
+    def test_sources(self):
+        self.assertEqual(resolve_language(self.track("rus")), ("rus", "tag"))
+        self.assertEqual(resolve_language(self.track("ru")), ("rus", "tag"))
+        self.assertEqual(resolve_language(self.track("", "Russian 5.1")), ("", ""))   # hint only
+        self.assertEqual(title_hint(self.track("", "Russian 5.1")), "rus")
+        self.assertEqual(title_hint(self.track("und", "Русский")), "rus")
+        self.assertEqual(title_hint(self.track("", "DUB")), "")
+        self.assertEqual(resolve_language(self.track("", "DUB")), ("", ""))
+        self.assertEqual(resolve_language(self.track("", "")), ("", ""))
+        self.assertEqual(resolve_language(self.track("", "", "ru")), ("rus", "override"))
+
+    def test_conflicting_title_is_not_even_a_hint(self):
+        self.assertEqual(title_hint(self.track("", "Russian / English")), "")
+
+    def test_commentary_titles_cannot_hide_a_missing_primary_track(self):
+        vf = make_vf(langs=("",))
+        vf.audio_tracks[0].title = "Original (Russian dub)"
+        self.assertEqual(primary_language_status(vf, "rus"), "unknown")
+        vf.audio_tracks[0].title = "English commentary"
+        self.assertEqual(primary_language_status(vf, "eng"), "unknown")
+
+    def test_tag_beats_title_override_beats_tag(self):
+        self.assertEqual(resolve_language(self.track("eng", "Russian")), ("eng", "tag"))
+        self.assertEqual(resolve_language(self.track("eng", "", "rus")), ("rus", "override"))
+
+    def test_labels(self):
+        self.assertEqual(language_label(self.track("rus")), "rus (tag)")
+        self.assertEqual(language_label(self.track("")), "unknown (untagged)")
+        self.assertEqual(language_label(self.track("", "Russian")), "unknown (title suggests rus)")
+
+    def test_filename_never_counts(self):
+        vf = make_vf("Фильм.на.русском.mkv", langs=("",))
+        self.assertEqual(primary_language_status(vf, "rus"), "unknown")
+
+    def test_status_uses_resolved_language(self):
+        vf = make_vf(langs=("",))
+        vf.audio_tracks[0].language_override = "rus"
+        self.assertEqual(primary_language_status(vf, "rus"), "present")
+        self.assertEqual(score_language_tracks(vf, "rus"), 0.0)
+
+    def test_confirmed_track_is_not_penalized_like_absent(self):
+        absent = make_vf(langs=("eng",))
+        confirmed = make_vf(langs=("",))
+        confirmed.audio_tracks[0].language_override = "rus"
+        self.assertEqual(score_language_tracks(absent, "rus"), -10.0)
+        self.assertEqual(score_language_tracks(confirmed, "rus"), 0.0)
+
+    def test_override_roundtrip_and_removal(self):
+        with tempfile.TemporaryDirectory() as d:
+            media = Path(d) / "movie.avi"
+            media.write_bytes(b"x" * 10)
+            store = Path(d) / "ov.json"
+            vf = make_vf(str(media.name), d, langs=("", "eng"))
+            vf.path = media
+            save_override(media, 0, "ru", store)
+            apply_overrides(vf, store)
+            self.assertEqual(resolve_language(vf.audio_tracks[0]), ("rus", "override"))
+            self.assertEqual(vf.audio_tracks[1].language_override, "")
+            save_override(media, 0, "", store)           # removal
+            apply_overrides(vf, store)
+            self.assertEqual(resolve_language(vf.audio_tracks[0]), ("", ""))
+
+    def test_changed_file_loses_the_confirmation(self):
+        with tempfile.TemporaryDirectory() as d:
+            media = Path(d) / "movie.avi"
+            media.write_bytes(b"x" * 10)
+            store = Path(d) / "ov.json"
+            vf = make_vf("movie.avi", d, langs=("",))
+            vf.path = media
+            save_override(media, 0, "rus", store)
+            media.write_bytes(b"y" * 20)                  # replaced by another file
+            apply_overrides(vf, store)
+            self.assertEqual(vf.audio_tracks[0].language_override, "")
+
+    def test_unknown_language_code_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            media = Path(d) / "m.avi"
+            media.write_bytes(b"x")
+            with self.assertRaises(ValueError):
+                save_override(media, 0, "rsu", Path(d) / "ov.json")
+            self.assertFalse((Path(d) / "ov.json").exists())
+
+    def test_damaged_store_is_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as d:
+            media, store = Path(d) / "m.avi", Path(d) / "ov.json"
+            media.write_bytes(b"x")
+            store.write_text("{not json", encoding="utf-8")
+            with self.assertRaises(OverrideStoreError):
+                save_override(media, 0, "rus", store)
+            self.assertEqual(store.read_text(encoding="utf-8"), "{not json")
+            store.write_text("[1, 2]", encoding="utf-8")        # valid JSON, wrong shape
+            with self.assertRaises(OverrideStoreError):
+                save_override(media, 0, "rus", store)
+
+    def test_unwritable_store_reports_cleanly(self):
+        with tempfile.TemporaryDirectory() as d:
+            media = Path(d) / "m.avi"
+            media.write_bytes(b"x")
+            with self.assertRaises(OverrideStoreError):
+                save_override(media, 0, "rus", Path(d) / "no_such_dir" / "ov.json")
+
+    def test_override_never_enters_the_probe_cache(self):
+        import cache
+        vf = make_vf(langs=("",))
+        vf.audio_tracks[0].language_override = "rus"
+        data = cache._serialize(vf)
+        self.assertNotIn("language_override", data["audio_tracks"][0])
+
+    def test_set_language_cli_checks_the_track(self):
+        if not HAVE_FFMPEG:
+            self.skipTest("ffmpeg required")
+        with tempfile.TemporaryDirectory() as d:
+            media = Path(d) / "m.mkv"
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=d=1",
+                            str(media)], check=True)
+            run = lambda *a: subprocess.run([sys.executable, str(ROOT / "cli.py"), *a],
+                                            capture_output=True, text=True, timeout=60)
+            self.assertEqual(run("--set-language", str(media), "5", "rus").returncode, 2)
+            self.assertEqual(run("--set-language", str(media), "1", "klingon").returncode, 2)
+            self.assertEqual(run("--set-language", str(media), "x", "rus").returncode, 2)
+
+    def test_override_is_reset_not_taken_from_cache(self):
+        vf = make_vf(langs=("",))
+        vf.audio_tracks[0].language_override = "rus"      # stale value from a cached copy
+        with tempfile.TemporaryDirectory() as d:
+            apply_overrides(vf, Path(d) / "none.json")
+        self.assertEqual(vf.audio_tracks[0].language_override, "")

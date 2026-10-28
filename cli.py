@@ -26,6 +26,7 @@ from comparator import (
 from compatibility import check_compatibility, compatibility_score
 from cache import set_cached
 from episode_matcher import group_episodes, scan_directory
+import episode_sequence
 from integrity import check_duration_sync, check_full, check_quick
 from models import VideoFile
 from probe import (detect_3d, detect_all_real_channels, detect_audio_quality,
@@ -49,6 +50,8 @@ def process_file(
         cfg = Config()
 
     vf = probe_file(path)
+    from languages import apply_overrides
+    apply_overrides(vf)
 
     # Detect real audio channels (fake 5.1 detection)
     detect_all_real_channels(path, vf)
@@ -207,6 +210,17 @@ def cmd_compare(args: argparse.Namespace) -> int:
     # Grouping and comparison
     groups = group_episodes(video_files)
     content_comparer = make_comparer(log, use_cache=not args.no_cache)
+    # Episode order across releases: durations screen, pictures verify
+    episode_sequence.assign_releases(video_files, paths)
+    verify_order = args.content or args.recommend_delete
+    seq_matcher = None
+    if verify_order:
+        from sequence import content_match
+        def seq_matcher(a, b):
+            log.write(f"  checking episode order: {a.path.name} vs {b.path.name}...\n")
+            log.flush()
+            return content_match(a, b, use_cache=not args.no_cache)
+    seq_reports = episode_sequence.analyze_groups(groups, seq_matcher)
 
     print(f"\n{'=' * 70}")
     print(f" COMPARISON RESULTS")
@@ -238,6 +252,10 @@ def cmd_compare(args: argparse.Namespace) -> int:
                 ranked = ranked_files(files)
                 for other in ranked[1:]:
                     print(format_sequence_report(content_comparer(ranked[0], other)))
+
+    seq_text = episode_sequence.format_reports(seq_reports)
+    if seq_text:
+        print(seq_text)
 
     # Overall summary for series
     has_comparisons = any(
@@ -284,7 +302,8 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
     # Deletion recommendations
     if args.recommend_delete:
-        _print_delete_recommendations(groups, cfg.primary_language, content_comparer)
+        _print_delete_recommendations(groups, cfg.primary_language, content_comparer,
+                                      episode_sequence.blocked_keys(seq_reports))
 
     return 0
 
@@ -425,12 +444,16 @@ def _verify_group(keeper: VideoFile, candidates: list[VideoFile], comparer,
     return keeper, deletable
 
 
-def deletion_candidates(groups: dict, primary_language: str = "", comparer=None):
+def deletion_candidates(groups: dict, primary_language: str = "", comparer=None,
+                        blocked: dict | None = None):
     """Split groups into (keep, delete, review) lists.
 
     review: [(reason, files)] for groups that need a human decision.
     A file is deleted only against a fully decoded, error-free keeper; a
     damaged file with no such replacement is never offered for deletion.
+
+    blocked: {(title, episode_key): reason} from episode_sequence; those
+    episodes get no deletion advice.
 
     comparer(a, b) -> SequenceComparison proves the pair holds the same
     video before anything is deleted.  Without one the caller must have
@@ -442,6 +465,9 @@ def deletion_candidates(groups: dict, primary_language: str = "", comparer=None)
     for title, episodes in groups.items():
         for ep_key, files in episodes.items():
             if len(files) < 2:
+                continue
+            if blocked and (title, ep_key) in blocked:
+                review.append((blocked[(title, ep_key)], files))
                 continue
             reason = _group_review_reason(ep_key, files, primary_language)
             if reason:
@@ -485,9 +511,11 @@ def _print_delete_recommendations(
     groups: dict,
     primary_language: str = "",
     comparer=None,
+    blocked: dict | None = None,
 ) -> None:
     """Print deletion recommendations for worst duplicates."""
-    to_keep, to_delete, review = deletion_candidates(groups, primary_language, comparer)
+    to_keep, to_delete, review = deletion_candidates(groups, primary_language, comparer,
+                                                     blocked)
 
     broken = damaged_without_replacement(groups)
     if broken:
@@ -539,6 +567,62 @@ def _print_delete_recommendations(
         print(f"  ... and {len(to_keep) - 5} more")
 
     print(f"\n  ⚠ WARNING: bestcut never deletes files; review the list before removing anything!")
+
+
+def _cmd_set_language(media: str, track: str, lang: str) -> int:
+    """--set-language FILE TRACK LANG: remember a confirmed audio language."""
+    from languages import OverrideStoreError, normalize_language, save_override
+    path = Path(media)
+    try:
+        index = int(track) - 1
+    except ValueError:
+        print("TRACK must be a number (1 = first audio track)", file=sys.stderr)
+        return 2
+    if not path.is_file():
+        print(f"File not found: {media}", file=sys.stderr)
+        return 2
+    try:
+        vf = probe_file(path)
+    except Exception as e:
+        print(f"Cannot read {media}: {e}", file=sys.stderr)
+        return 2
+    if not 0 <= index < len(vf.audio_tracks):
+        print(f"{media} has {len(vf.audio_tracks)} audio track(s); "
+              f"track {track} does not exist", file=sys.stderr)
+        return 2
+    try:
+        save_override(path, index, "" if lang == "-" else lang)
+    except (ValueError, OverrideStoreError) as e:
+        print(f"Not saved: {e}", file=sys.stderr)
+        return 2
+    print(f"Track {track} of {media}: "
+          + ("confirmation removed" if lang == "-" else f"confirmed as {normalize_language(lang)}"))
+    return 0
+
+
+def _cmd_find_series(args: argparse.Namespace) -> int:
+    """--find-series: exit 0 = found, 1 = nothing found, 2 = roots missing/unreadable."""
+    import json
+    from discovery import find_series
+    if not args.paths:
+        print("--find-series needs at least one root directory", file=sys.stderr)
+        return 2
+    result = find_series(args.find_series, args.alias, [Path(p) for p in args.paths],
+                         max_depth=args.max_depth)
+    if args.json:
+        print(json.dumps(result.to_json(), ensure_ascii=False, indent=2))
+    else:
+        for p in result.matches:
+            print(p)
+        for p in result.missing_roots:
+            print(f"MISSING ROOT: {p}", file=sys.stderr)
+        for p, err in result.unreadable:
+            print(f"UNREADABLE: {p} ({err})", file=sys.stderr)
+        if not result.matches and result.searched_ok:
+            print("No matching directories found.", file=sys.stderr)
+    if not result.searched_ok:
+        return 2
+    return 0 if result.matches else 1
 
 
 def cmd_info(args: argparse.Namespace) -> int:
@@ -679,6 +763,24 @@ def main():
              "SSIM, colour, inserted/replaced segments); slow",
     )
     parser.add_argument(
+        "--set-language", nargs=3, metavar=("FILE", "TRACK", "LANG"),
+        help="Confirm the spoken language of an audio track (1-based track, "
+             "e.g. --set-language movie.avi 1 rus); use '-' to remove",
+    )
+    parser.add_argument(
+        "--find-series", metavar="NAME",
+        help="List directories of a series under the given roots (no probing); "
+             "positional arguments are the roots to search",
+    )
+    parser.add_argument(
+        "--alias", action="append", default=[], metavar="NAME",
+        help="Alternative name for --find-series (repeatable)",
+    )
+    parser.add_argument(
+        "--max-depth", type=int, default=4,
+        help="Directory depth searched by --find-series (default 4)",
+    )
+    parser.add_argument(
         "--no-cache", action="store_true",
         help="Disable cache (always run ffprobe from scratch)",
     )
@@ -697,6 +799,13 @@ def main():
     if args.list_profiles:
         print(list_profiles())
         sys.exit(0)
+
+    if args.find_series:
+        return_code = _cmd_find_series(args)
+        sys.exit(return_code)
+
+    if args.set_language:
+        sys.exit(_cmd_set_language(*args.set_language))
 
     if args.clear_cache:
         from cache import clear_cache

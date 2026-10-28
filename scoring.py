@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 
 from languages import (is_unknown_language, language_matches, normalize_language,
-                       primary_language_status)
+                       primary_language_status, track_language)
 from models import VideoFile
 from profiles import ScoringWeights
 
@@ -167,7 +167,7 @@ def select_best_audio(vf: VideoFile, primary_language: str = ""):
         return None
     pool = vf.audio_tracks
     if primary_language:
-        pool = [at for at in pool if language_matches(at.language, primary_language)] or pool
+        pool = [at for at in pool if language_matches(track_language(at), primary_language)] or pool
     return max(pool, key=_audio_track_rank)
 
 
@@ -262,8 +262,8 @@ def score_audio(vf: VideoFile, primary_language: str = "") -> float:
         bitrate_score = 1.0
 
     # Multi-language (0-3)
-    languages = {normalize_language(at.language) for at in vf.audio_tracks
-                 if not is_unknown_language(at.language)}
+    languages = {normalize_language(track_language(at)) for at in vf.audio_tracks
+                 if not is_unknown_language(track_language(at))}
     multi_score = min(3.0, len(languages) * 1.0)
 
     base = spatial_score + codec_score + channel_score + bitrate_score + multi_score
@@ -313,7 +313,7 @@ def score_language_tracks(vf: VideoFile,
 
     score = 0.0
     primary_tracks = [at for at in vf.audio_tracks
-                      if language_matches(at.language, primary_language)]
+                      if language_matches(track_language(at), primary_language)]
 
     if not primary_tracks:
         # Penalize only confirmed absence; untagged tracks may well be
@@ -328,8 +328,8 @@ def score_language_tracks(vf: VideoFile,
 
     # Bonus for extra languages
     if extra_languages:
-        available = {normalize_language(at.language) for at in vf.audio_tracks
-                     if not is_unknown_language(at.language)}
+        available = {normalize_language(track_language(at)) for at in vf.audio_tracks
+                     if not is_unknown_language(track_language(at))}
         present = sum(1 for lang in extra_languages
                       if normalize_language(lang) in available)
         score += min(3.0, present * extra_language_bonus)

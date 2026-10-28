@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from languages import language_label, language_matches, resolve_language, track_language
 from models import VideoFile
 from profiles import ScoringWeights
 from scoring import (audio_quality_flags, bits_per_pixel, effective_bitrate,
@@ -64,7 +65,7 @@ def format_file_info(vf: VideoFile, verbose: bool = False, weights: ScoringWeigh
     # Audio
     for i, at in enumerate(vf.audio_tracks):
         br_kbps = at.bitrate / 1000 if at.bitrate else 0
-        lang = at.language or "unknown (untagged)"
+        lang = language_label(at)
         title_str = f" «{at.title}»" if at.title else ""
         spatial_str = f" [{at.spatial_format}]" if at.spatial_format else ""
         lossless_str = " (lossless)" if at.is_lossless and not at.spatial_format else ""
@@ -350,7 +351,7 @@ def _audio_tracks_detail(vf: VideoFile) -> list[str]:
     lines = []
     for i, at in enumerate(vf.audio_tracks):
         br_kbps = at.bitrate / 1000 if at.bitrate else 0
-        lang = at.language or "unknown"
+        lang = language_label(at)
         sr = f"{at.sample_rate // 1000}kHz" if at.sample_rate else ""
         parts = [f"{at.format_label} {at.channel_label}"]
         parts.append(f"{br_kbps:.0f}k")
@@ -484,7 +485,7 @@ def format_group_comparison(
         if cfg and cfg.primary_language:
             lang = cfg.primary_language
             rows.append([f"Audio ({lang})", *[
-                f"{sum(1 for at in vf.audio_tracks if at.language == lang)} tracks"
+                f"{sum(1 for at in vf.audio_tracks if language_matches(track_language(at), lang))} tracks"
                 for vf in ranked
             ]])
         rows.append(["Audio total", *[f"{len(vf.audio_tracks)} tracks" for vf in ranked]])
@@ -763,6 +764,8 @@ def export_json(files: list[VideoFile], cfg=None) -> str:
                     "bitrate": at.bitrate,
                     "sample_rate": at.sample_rate,
                     "language": at.language,
+                    "language_resolved": track_language(at),
+                    "language_source": resolve_language(at)[1],
                     "has_atmos": at.has_atmos,
                     "has_dtsx": at.has_dtsx,
                     "is_lossless": at.is_lossless,

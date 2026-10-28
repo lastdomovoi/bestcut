@@ -37,7 +37,7 @@ from operator import sub
 from pathlib import Path
 
 import cache
-from models import VideoFile
+from models import AudioTrack, VideoFile
 from procutil import run_tool, run_tool_bytes
 
 # --- thumbnails -----------------------------------------------------------
@@ -50,10 +50,15 @@ THUMB_VERSION = 1
 FLAT_STD = 3.0
 
 # --- alignment ------------------------------------------------------------
-MATCH_DIST = 0.45          # mean |difference| in std units: below = same picture
+# Mean |difference| in std units below which two thumbnails show the same
+# picture.  Calibrated on re-encodes (crf 12-30), rescaled/pillarboxed and
+# colour-graded copies: median 0.07, 95th percentile 0.16, max 0.16; clearly
+# different shots measure 0.3-1.1.  Per-second tests allow 1.4x this.
+MATCH_DIST = 0.25
 COARSE_PROBES = 24
 FINE_PROBES = 60
 SEGMENT_SEC = 10
+GLOBAL_MIN_SHARE = 0.25    # share of probes that must agree at the best offset
 SEGMENT_MIN_SHARE = 0.6    # share of seconds that must match to accept an offset
 SHIFT_MAX = 180            # largest inserted/removed stretch looked for (s)
 UNPAIRED_SEC = 2           # head/tail longer than this is a different cut
@@ -275,27 +280,43 @@ def _match_share(a: ThumbSeq, b: ThumbSeq, seconds: list[int], offset: int,
     return ok / len(seconds)
 
 
+def _probe_share(a: ThumbSeq, b: ThumbSeq, seconds: list[int], offset: int,
+                 min_valid: int = 1) -> tuple[float, float] | None:
+    """(share of probes that match, their mean distance) at an offset."""
+    vals = []
+    for i in seconds:
+        j = i + offset
+        if a.informative(i) and b.informative(j):
+            vals.append(_dist(a.norm[i], b.norm[j]))
+    if len(vals) < min_valid:
+        return None
+    ok = sum(1 for v in vals if v <= MATCH_DIST * 1.4)
+    return ok / len(vals), sum(vals) / len(vals)
+
+
 def global_offset(a: ThumbSeq, b: ThumbSeq) -> tuple[int, float] | None:
-    """Best single offset (B index = A index + offset) and its distance."""
+    """Offset (B index = A index + offset) at which most probes match, and
+    that share.  Inserted or replaced stretches lower the share but do not
+    hide the offset the rest of the film agrees on."""
     span = min(MAX_GLOBAL_OFFSET, abs(len(a) - len(b)) + 90)
     probes = _probe_seconds(a, COARSE_PROBES)
     if len(probes) < 4:
         return None
     scored = []
     for off in range(-span, span + 1):
-        d = _mean_dist(a, b, probes, off, min_valid=4)
-        if d is not None:
-            scored.append((d, off))
+        r = _probe_share(a, b, probes, off, min_valid=4)
+        if r is not None:
+            scored.append((-r[0], r[1], off))
     if not scored:
         return None
     scored.sort()
     fine = _probe_seconds(a, FINE_PROBES)
     best = None
-    for _, off in scored[:5]:
-        d = _mean_dist(a, b, fine, off, min_valid=4)
-        if d is not None and (best is None or d < best[1]):
-            best = (off, d)
-    return best
+    for _, _, off in scored[:5]:
+        r = _probe_share(a, b, fine, off, min_valid=4)
+        if r is not None and (best is None or (r[0], -r[1]) > (best[1], -best[2])):
+            best = (off, r[0], r[1])
+    return (best[0], best[1]) if best else None
 
 
 @dataclass
@@ -323,7 +344,7 @@ def _second_state(a: ThumbSeq, b: ThumbSeq, i: int, off: int) -> str:
 def align(a: ThumbSeq, b: ThumbSeq) -> Alignment | None:
     """Piecewise alignment of two timelines."""
     g = global_offset(a, b)
-    if g is None or g[1] > MATCH_DIST * 1.5:
+    if g is None or g[1] < GLOBAL_MIN_SHARE:
         # no stretch of the files looks alike at any offset
         return None
     cur = g[0]
@@ -806,10 +827,11 @@ def compare_streams(va: VideoFile, vb: VideoFile, ha: dict | None,
     else:
         changed.append("video")
     from collections import Counter
-    from languages import is_unknown_language, normalize_language
+    from languages import is_unknown_language, normalize_language, track_language
 
     def lang_of(t):
-        return "?" if is_unknown_language(t.language) else normalize_language(t.language)
+        code = track_language(t) if isinstance(t, AudioTrack) else t.language
+        return "?" if is_unknown_language(code) else normalize_language(code)
 
     for kind, label in (("a", "audio"), ("s", "subtitle")):
         tracks_a = va.audio_tracks if kind == "a" else va.subtitle_tracks
@@ -1018,3 +1040,24 @@ def compare_files(a: VideoFile, b: VideoFile, use_cache: bool = True,
     comp.review_reasons = _review_reasons(comp)
     comp.review_required = bool(comp.review_reasons)
     return comp
+
+
+def content_match(a: VideoFile, b: VideoFile, use_cache: bool = True):
+    """How much of A's picture appears in B (for episode-order checks).
+
+    Decodes both files into cached thumbnails and aligns them; the result
+    is the matched share of informative seconds, 0.0 if nothing aligns.
+    """
+    from episode_sequence import ContentMatch
+    sa, sb = extract_thumbs(a, use_cache), extract_thumbs(b, use_cache)
+    if sa is None or sb is None:
+        return None
+    al = align(sa, sb)
+    if al is None:
+        return ContentMatch(0.0, None, "nothing aligns")
+    offset = next((o for o in al.offsets if o is not None), None)
+    note = ""
+    divs = find_divergences(al, len(sb))
+    if any(d.kind in ("extra_in_a", "extra_in_b") for d in divs):
+        note = "; ".join(d.note for d in divs if d.kind in ("extra_in_a", "extra_in_b"))
+    return ContentMatch(al.coverage, offset, note)

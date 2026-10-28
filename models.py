@@ -175,6 +175,7 @@ class AudioTrack:
     sample_rate: int = 0
     language: str = ""
     title: str = ""
+    language_override: str = ""  # user-confirmed language (set per run, never trusted from cache)
     default: bool = False
     duration: float = 0.0
     has_atmos: bool = False  # Dolby Atmos (TrueHD Atmos / EAC3 JOC)
@@ -323,6 +324,7 @@ class VideoFile:
     compatibility_issues: list[str] = field(default_factory=list)
     source_type: str = ""  # "BDRip", "WEB-DL", "HDTV", "DVDRip", etc.
     metadata_warnings: list[str] = field(default_factory=list)
+    release: int = -1             # index of the command-line path it came from (not cached)
     content_note: str = ""        # result of synchronized comparison (not cached)
     content_penalty: float = 0.0  # points removed for an established overlay/ad
     # Master-grade indicators measured from the content (never names/tags)

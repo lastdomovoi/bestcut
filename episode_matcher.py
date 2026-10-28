@@ -18,6 +18,9 @@ EPISODE_PATTERNS = [
     re.compile(r'(\d{1,2})[xX](\d{1,3})'),
     # Season 1 Episode 01
     re.compile(r'[Ss]eason\s*(\d{1,3})\s*[Ee]pisode\s*(\d{1,3})', re.IGNORECASE),
+    # "Interny-13.(01.seriya)": season in the title tail, episode in brackets
+    re.compile(r'[-_\s](\d{1,2})[.\s_]*\((\d{1,3})[.\s_]*(?:seriya|seriy|серия|серии|series)\)',
+               re.IGNORECASE),
     # E01, Ep01, Ep.01 (no season)
     re.compile(r'[Ee](?:p\.?\s*)?(\d{1,3})(?!\d)'),
     # " - 01", " - 001" (anime style)
@@ -36,8 +39,9 @@ VIDEO_EXTENSIONS = {
 
 # Explicit absolute episode number after the SxxEyy marker: "s10e01.(181)"
 _ABSOLUTE_RE = re.compile(r'[Ss]\d{1,3}[._\-\s]*[Ee]\d{1,3}[._\-\s]*\((\d{1,4})\)')
-# Zero-padded Russian episode number ("Серия №071") counts as absolute
-_RU_ABSOLUTE_RE = re.compile(r'Сезон[\s_№]*\d{1,3}[\W_]*Сери[яи][\s_№]*(0\d{2,3})', re.IGNORECASE)
+# Russian releases number episodes across the whole series: a zero-padded or
+# 3+ digit "Серия №071" / "Серия №181" is an absolute number
+_RU_ABSOLUTE_RE = re.compile(r'Сезон[\s_№]*\d{1,3}[\W_]*Сери[яи][\s_№]*(0\d{2,3}|[1-9]\d{2,3})', re.IGNORECASE)
 
 
 def _strip_ext(filename: str) -> str:
@@ -50,7 +54,8 @@ def _strip_ext(filename: str) -> str:
 
 
 # "(1080)" / "(2019)" are resolutions and years, not episode numbers
-_NOT_EPISODE_NUMBERS = {240, 360, 480, 576, 720, 1080, 1440, 2160}
+# (240 and 360 stay valid: long series do reach those episode numbers)
+_NOT_EPISODE_NUMBERS = {480, 576, 720, 1080, 1440, 2160}
 
 
 def parse_absolute_episode(filename: str) -> int | None:
@@ -68,7 +73,7 @@ def parse_absolute_episode(filename: str) -> int | None:
 
 # The first patterns carry an explicit season and episode marker; the rest
 # (bare E01, " - 01", trailing -1) are too loose for arbitrary directories.
-_STRICT_PATTERNS = 4
+_STRICT_PATTERNS = 5
 PARENT_DEPTH = 3
 
 
@@ -101,6 +106,7 @@ def normalize_title(filename: str) -> str:
     # Cut everything after season/episode marker
     cut_patterns = [
         r'(?i)Сезон[\s_№]*\d',
+        r'(?i)[-_\s]\d{1,2}[.\s_]*\(\d{1,3}[.\s_]*(?:seriya|seriy|серия|серии|series)\)',
         r'[Ss]\d{1,3}[._\-\s]*[Ee]',
         r'\d{1,2}[xX]\d{1,3}',
         r'[Ss]eason\s*\d',
@@ -193,6 +199,7 @@ def group_episodes(files: list[VideoFile]) -> dict[str, dict[tuple[int | None, i
         lambda: defaultdict(list)
     )
 
+    parsed = []
     for vf in files:
         fname = vf.path.name
         season, episode = parse_episode(fname)
@@ -212,26 +219,49 @@ def group_episodes(files: list[VideoFile]) -> dict[str, dict[tuple[int | None, i
                     title_source = parent.name
                     break
 
-        vf.season = season
-        vf.episode = episode
-        # An explicit series-wide number identifies the episode across
-        # releases whose season numbering differs.
-        absolute = parse_absolute_episode(fname)
-        key = (None, absolute) if absolute is not None else (season, episode)
-
         if episode is not None:
             title = normalize_title(title_source)
-            vf.series_title = title
         else:
             # For standalone movies — use filename
             title = normalize_title(fname) or vf.path.stem.lower()
-            vf.series_title = title
+        parsed.append((vf, fname, season, episode, title))
 
+    offsets = _season_offsets(parsed)
+
+    for vf, fname, season, episode, title in parsed:
+        vf.season = season
+        vf.episode = episode
+        vf.series_title = title
+        # An explicit series-wide number identifies the episode across
+        # releases whose season numbering differs.
+        absolute = parse_absolute_episode(fname)
+        if (absolute is None and season is not None and episode is not None
+                and season in offsets.get(title, {})):
+            absolute = offsets[title][season] + episode   # via another release
+        key = (None, absolute) if absolute is not None else (season, episode)
         groups[title][key].append(vf)
 
     # Merge groups that have different titles but same episode keys
     # (common when comparing releases with transliterated vs original names)
     return _merge_by_episode(dict(groups))
+
+
+def _season_offsets(parsed) -> dict[str, dict[int, int]]:
+    """{title: {season: absolute - episode}} learned from names that carry
+    both ("s10e01.(181)"), used to place releases that only say "13, 01".
+
+    Only SxxEyy+(abs) names count (Russian "Серия №N" is already absolute),
+    and a season is used only when every file agrees on its offset.
+    """
+    seen: dict[str, dict[int, set[int]]] = defaultdict(lambda: defaultdict(set))
+    for vf, fname, season, episode, title in parsed:
+        m = _ABSOLUTE_RE.search(_strip_ext(fname))
+        if m and season is not None and episode is not None:
+            absolute = int(m.group(1))
+            if absolute not in _NOT_EPISODE_NUMBERS and not 1900 <= absolute <= 2099:
+                seen[title][season].add(absolute - episode)
+    return {t: {s: next(iter(o)) for s, o in seasons.items() if len(o) == 1}
+            for t, seasons in seen.items()}
 
 
 def _titles_similar(t1: str, t2: str) -> bool:
