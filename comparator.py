@@ -370,6 +370,12 @@ def _audio_tracks_detail(vf: VideoFile) -> list[str]:
         note = _channel_note(at)
         if note:
             parts.append(note)
+        ig = vf.integrity
+        if ig.track_errors.get(i):
+            parts.append(f"[{ig.track_errors[i]} decode errors]")
+        if ig.track_gaps.get(i):
+            first = ig.track_gaps[i][0]
+            parts.append(f"[{len(ig.track_gaps[i])} timestamp gap(s), first at {first[0]:.0f}s]")
         lines.append(" ".join(parts))
     return lines
 
@@ -459,6 +465,8 @@ def format_group_comparison(
             *([["Nominal FPS", *[f"{vf.video.nominal_fps:.2f}" if vf.video.fps_mismatch else "-"
                                  for vf in ranked]]]
               if any(vf.video.fps_mismatch for vf in ranked) else []),
+            *([["Cadence", *[", ".join(vf.video.cadence_notes) or "-" for vf in ranked]]]
+              if any(vf.video.cadence_notes for vf in ranked) else []),
             ["Bit depth", *[f"{vf.video.bit_depth}-bit" for vf in ranked]],
             ["Color space", *[vf.video.color_space or "-" for vf in ranked]],
             ["Color transfer", *[vf.video.color_transfer or "-" for vf in ranked]],
@@ -729,6 +737,13 @@ def export_json(files: list[VideoFile], cfg=None) -> str:
                 "fps": vf.video.fps,
                 "nominal_fps": vf.video.nominal_fps,
                 "fps_mismatch": vf.video.fps_mismatch,
+                "interval_fps": vf.video.interval_fps,
+                "vfr": vf.video.vfr,
+                "telecine": vf.video.telecine,
+                "interlaced": vf.video.interlaced,
+                "repeated_frame_share": vf.video.repeated_frame_share,
+                "timestamp_defects": vf.video.timestamp_defects,
+                "cadence_notes": vf.video.cadence_notes,
                 "bit_depth": vf.video.bit_depth,
                 "color_space": vf.video.color_space,
                 "color_transfer": vf.video.color_transfer,
@@ -759,6 +774,8 @@ def export_json(files: list[VideoFile], cfg=None) -> str:
                     "noise_floor_db": at.noise_floor_db,
                     "clip_ratio": at.clip_ratio,
                     "hf_level_db": at.hf_level_db,
+                    "bandwidth_hz": at.bandwidth_hz,
+                    "clicks_per_min": at.clicks_per_min,
                     "effective_channels": at.effective_channels,
                     "channel_layout": at.channel_label,
                     "bitrate": at.bitrate,

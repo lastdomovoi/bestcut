@@ -8,6 +8,8 @@ import statistics
 import subprocess
 from pathlib import Path
 
+from audio_clicks import detect_clicks
+from cadence import analyze_cadence
 from channels import analyze_channels
 from procutil import run_tool
 from models import AudioTrack, SubtitleTrack, VideoFile, VideoTrack
@@ -448,8 +450,12 @@ def _stereo_mode_from_name(name: str) -> str:
 
 def detect_3d(path: Path, vf: VideoFile) -> None:
     """Detect 3D/stereoscopic video from metadata and stream info."""
-    # Check MVC codec (H.264 MVC for Blu-ray 3D)
-    if vf.video.codec in ("h264_mvc", "mvc"):
+    # MVC (Blu-ray 3D): the dependent view is an H.264 "Stereo High" /
+    # "Multiview High" stream (profile_idc 128 / 118)
+    profiles = [p.lower() for p in [vf.video.profile, *vf.video.stream_profiles]]
+    if (vf.video.codec in ("h264_mvc", "mvc")
+            or any(p in ("stereo high", "multiview high", "multiview high depth")
+                   for p in profiles)):
         vf.video.is_3d = True
         vf.video.stereo_mode = "mvc"
         return
@@ -563,6 +569,24 @@ def measure_picture(path: Path, vf: VideoFile) -> bool:
     return True
 
 
+def measure_cadence(path: Path, vf: VideoFile) -> bool:
+    """Fill the cadence fields once (timestamps, VFR, telecine, repeats)."""
+    v = vf.video
+    if v.cadence_measured:
+        return False
+    c = analyze_cadence(path, vf.duration, v.nominal_fps, v.fps)
+    v.cadence_measured = True
+    v.interval_fps, v.vfr = c.interval_fps, c.vfr
+    v.telecine = c.telecine
+    v.interlaced = v.field_order in ("tt", "bb", "tb", "bt")
+    if v.interlaced and not c.telecine:
+        c.notes.append("interlaced")
+    v.repeated_frame_share = c.repeated_frame_share
+    v.timestamp_defects = c.duplicate_timestamps + c.non_monotonic_dts + c.gaps
+    v.cadence_notes = c.notes
+    return True
+
+
 def detect_remaster(path: Path, vf: VideoFile) -> None:
     """Infer a modern HDR master from measurements only.
 
@@ -654,6 +678,15 @@ MIN_PAUSE_DEPTH_DB = 12.0
 # Content above this frequency is expected in real full-band audio.
 HF_CUTOFF_HZ = 16000
 
+# Bands probed for the bandwidth estimate; content within 45 dB of the
+# overall level (through the steep filter) in a band means the stream
+# reaches at least that frequency.
+BANDWIDTH_PROBES = (8000, 12000, 16000, 18000, 20000)
+BANDWIDTH_FLOOR_DB = -45.0
+# Cascaded highpass stages per probe: one biquad leaks too much of the
+# content below the cutoff to say anything about the content above it
+BANDWIDTH_STAGES = 4
+
 
 
 def _astats_blocks(stderr: str, instance: str) -> dict[str, dict[str, float]]:
@@ -723,20 +756,25 @@ def analyze_audio_quality(path: Path, stream_index: int, duration: float,
     if length <= 0:
         return None
 
-    with_hf = check_bandwidth and (
-        sample_rate == 0 or sample_rate / 2 > HF_CUTOFF_HZ * 1.1)
+    bands = [f for f in BANDWIDTH_PROBES
+             if check_bandwidth and (sample_rate == 0 or sample_rate / 2 > f * 1.1)]
+    with_hf = bool(bands)
     graph = f"[0:a:{stream_index}]"
     if with_hf:
-        graph += (f"asplit[a][b];[a]astats@full[ao];"
-                  f"[b]highpass=f={HF_CUTOFF_HZ},astats@hf[bo]")
+        # outputs: the full signal and one steep highpass branch per probe
+        pads = "".join(f"[b{k}]" for k in range(len(bands)))
+        graph += f"asplit={len(bands) + 1}[a]{pads};[a]astats@full[ao]"
+        for k, f in enumerate(bands):
+            stages = ",".join([f"highpass=f={f}"] * BANDWIDTH_STAGES)
+            graph += f";[b{k}]{stages},astats@bw{k}[bo{k}]"
     else:
         graph += "astats@full[ao]"
     # -ss/-t before -i limit the input, so every output sees the same span.
     cmd = ["ffmpeg", "-v", "info", "-nostdin",
            "-ss", str(int(start)), "-t", str(int(length)), "-i", str(path),
            "-filter_complex", graph, "-map", "[ao]", "-f", "null", "-"]
-    if with_hf:
-        cmd += ["-map", "[bo]", "-f", "null", "-"]
+    for k in range(len(bands)):
+        cmd += ["-map", f"[bo{k}]", "-f", "null", "-"]
     try:
         result = run_tool(cmd, timeout=120)
     except (subprocess.TimeoutExpired, OSError):
@@ -750,7 +788,7 @@ def analyze_audio_quality(path: Path, stream_index: int, duration: float,
 
     out: dict[str, float | None] = {
         "snr_db": None, "noise_floor_db": None,
-        "clip_ratio": None, "hf_level_db": None,
+        "clip_ratio": None, "hf_level_db": None, "bandwidth_hz": None,
     }
     noise = _noise_floor(full_blocks)
     if noise is not None:
@@ -762,10 +800,19 @@ def analyze_audio_quality(path: Path, stream_index: int, duration: float,
     else:
         out["clip_ratio"] = 0.0
 
-    if with_hf:
-        hf = _astats_blocks(result.stderr, "hf").get("Overall", {}).get("RMS level dB")
-        if hf is not None and rms != float("-inf"):
-            out["hf_level_db"] = max(-200.0, hf) - rms
+    if with_hf and rms != float("-inf"):
+        reached = 0
+        for k, f in enumerate(bands):
+            level = _astats_blocks(result.stderr, f"bw{k}").get("Overall", {}).get("RMS level dB")
+            if level is None:
+                continue
+            rel = max(-200.0, level) - rms
+            if f == HF_CUTOFF_HZ:
+                out["hf_level_db"] = rel
+            if rel > BANDWIDTH_FLOOR_DB:
+                reached = f
+        # below the lowest probe nothing can be said beyond "under that"
+        out["bandwidth_hz"] = reached or bands[0]
     return out
 
 
@@ -788,6 +835,9 @@ def detect_audio_quality(path: Path, vf: VideoFile, index: int | None) -> bool:
     at.noise_floor_db = stats["noise_floor_db"]
     at.clip_ratio = stats["clip_ratio"]
     at.hf_level_db = stats["hf_level_db"]
+    at.bandwidth_hz = stats["bandwidth_hz"]
+    clicks = detect_clicks(path, index, at.duration or vf.duration)
+    at.clicks_per_min = clicks.per_minute if clicks else None
     return True
 
 
@@ -858,6 +908,7 @@ def probe_file(path: Path, use_cache: bool = True) -> VideoFile:
             pix_fmt=s.get("pix_fmt", ""),
             color_space=s.get("color_space", ""),
             color_range=s.get("color_range", ""),
+            field_order=s.get("field_order", ""),
             nb_frames=int(s.get("nb_frames") or 0) if str(s.get("nb_frames", "0")).isdigit() else 0,
             color_transfer=s.get("color_transfer", ""),
             color_primaries=s.get("color_primaries", ""),
@@ -865,6 +916,8 @@ def probe_file(path: Path, use_cache: bool = True) -> VideoFile:
             encoder=encoder,
             duration=float(s.get("duration", 0) or 0),
         )
+        vf.video.stream_profiles = [x.get("profile", "") for x in streams
+                                    if x.get("codec_type") == "video"]
         # If video bitrate is missing — estimate from overall
         if vf.video.bitrate == 0 and vf.overall_bitrate > 0:
             audio_total = sum(

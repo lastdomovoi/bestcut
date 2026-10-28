@@ -22,6 +22,7 @@ class VideoTrack:
     color_transfer: str = ""
     color_primaries: str = ""
     color_range: str = ""       # "tv" / "pc" / "" if untagged
+    field_order: str = ""       # ffprobe field_order: progressive, tt, bb, tb, bt
     nb_frames: int = 0           # container frame count (0 = unknown)
     hdr_type: str = ""  # "", "hdr10", "hdr10+", "dolby_vision", "hlg"
     encoder: str = ""   # e.g. "x264", "x265", "rav1e", "libvpx"
@@ -33,10 +34,28 @@ class VideoTrack:
     crop_height: int | None = None  # Actual content height (without black bars)
     crop_uncertain: bool = False    # crop samples disagreed; geometry not trusted
     duration: float = 0.0
+    stream_profiles: list[str] = field(default_factory=list)  # profiles of ALL video streams
+    # Cadence (cadence.py); cadence_measured False = not analyzed yet
+    cadence_measured: bool = False
+    interval_fps: float | None = None
+    vfr: bool = False
+    telecine: bool = False
+    interlaced: bool = False
+    repeated_frame_share: float | None = None
+    timestamp_defects: int = 0
+    cadence_notes: list[str] = field(default_factory=list)
     # Picture measurements (None = not measured)
     detail_psnr: float | None = None  # PSNR vs. half-res round trip; high = no fine detail
     peak_luma: float | None = None    # Median frame peak luma, fraction of code range
     picture_measured: bool = False    # measurement attempted (also set on failure)
+
+    @property
+    def quality_fps(self) -> float:
+        """Frame rate of the distinct pictures, for bits-per-pixel: repeated
+        pictures cost almost no bits and would understate the quality."""
+        if self.repeated_frame_share and self.repeated_frame_share >= 0.12 and not self.telecine:
+            return self.fps * (1.0 - self.repeated_frame_share)
+        return self.fps
 
     @property
     def fps_mismatch(self) -> bool:
@@ -189,6 +208,8 @@ class AudioTrack:
     noise_floor_db: float | None = None   # RMS of the quietest window
     clip_ratio: float | None = None       # Share of samples stuck at peak level
     hf_level_db: float | None = None      # RMS above 16 kHz, relative to overall RMS
+    bandwidth_hz: int | None = None       # highest probed band that still holds content
+    clicks_per_min: float | None = None   # isolated impulsive defects (pops, crackle)
 
     @property
     def spatial_format(self) -> str:
@@ -283,6 +304,9 @@ class IntegrityResult:
     checked: bool = False
     full_checked: bool = False  # whole file was decoded
     timestamp_issues: int = 0   # non-monotonic timestamps (flagged, not corruption)
+    freezes: list[tuple[float, float]] = field(default_factory=list)   # (start s, duration s) of frozen video
+    track_errors: dict[int, int] = field(default_factory=dict)        # audio track index -> decode errors
+    track_gaps: dict[int, list[tuple[float, float]]] = field(default_factory=dict)  # (time, gap s) per audio track
     issues: list[IntegrityIssue] = field(default_factory=list)  # capped sample
 
     @property

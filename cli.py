@@ -31,7 +31,7 @@ from integrity import check_duration_sync, check_full, check_quick
 from models import VideoFile
 from probe import (detect_3d, detect_all_real_channels, detect_audio_quality,
                     detect_crop_and_upscale, detect_remaster, detect_source_type,
-                    measure_picture, probe_file)
+                    measure_cadence, measure_picture, probe_file)
 from profiles import ScoringWeights, get_profile, list_profiles, parse_custom_weights
 from sequence import SAFE_RELATIONS
 from scoring import calculate_score, rank_key, ranked_files, select_best_audio
@@ -72,6 +72,8 @@ def process_file(
     # Picture measurements, then the master-grade verdict built on them
     if cfg.analyze_picture and measure_picture(path, vf):
         new_data = True
+    if cfg.analyze_picture and measure_cadence(path, vf):
+        new_data = True
     if new_data:
         set_cached(path, vf)  # keep the measurements for the next run
     detect_remaster(path, vf)
@@ -80,7 +82,7 @@ def process_file(
     if check_integrity == "quick":
         vf.integrity = check_quick(path)
     elif check_integrity == "full":
-        vf.integrity = check_full(path, vf.duration)
+        vf.integrity = check_full(path, vf.duration, len(vf.audio_tracks))
 
     # Stream duration sync (quick check, always)
     sync_issues = check_duration_sync(vf)

@@ -16,7 +16,7 @@ from pathlib import Path
 from models import AudioTrack, IntegrityResult, SubtitleTrack, VideoFile, VideoTrack
 
 # Bump when probe output changes so stale entries are not reused.
-CACHE_VERSION = 5
+CACHE_VERSION = 6
 
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "bestcut"
 

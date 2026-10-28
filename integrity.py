@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import re
+import statistics
 import subprocess
 from pathlib import Path
 
 from models import IntegrityIssue, IntegrityResult
 from procutil import run_tool
+
+# Frozen video this long is reported (static scenes exist, so a warning only)
+MIN_FREEZE_SEC = 3.0
+
+# Audio packets this far from continuous are a timestamp discontinuity
+AUDIO_GAP_SEC = 0.05
+MAX_STORED_GAPS = 20
 
 # Issues kept per file; error_count still counts every line.
 MAX_STORED_ISSUES = 200
@@ -62,14 +70,14 @@ _TIMESTAMP_RE = re.compile(
 
 
 def _add_issue(result: IntegrityResult, line: str, stage: str,
-               time: float | None = None) -> None:
+               time: float | None = None, stream: str | None = None) -> None:
     line = line.strip()
     if _TIMESTAMP_RE.search(line):
         result.timestamp_issues += 1
         return
     result.errors.append(f"[{stage}] {line}" if stage else line)
     result.error_count += 1
-    stream = classify_stream(line)
+    stream = stream or classify_stream(line)
     if stream not in result.affected_streams:
         result.affected_streams.append(stream)
     if time is not None:
@@ -121,19 +129,89 @@ def _note_timestamps(result: IntegrityResult) -> None:
             "(playback may stutter; media decodes without errors)")
 
 
-def check_full(path: Path, expected_duration: float = 0.0) -> IntegrityResult:
+_FREEZE_RE = re.compile(r"freeze_start=([\d.]+)|freeze_duration=([\d.]+)")
+
+
+def parse_freezes(stdout: str, end_time: float = 0.0) -> list[tuple[float, float]]:
+    """(start, duration) pairs from freezedetect's metadata output.
+
+    freezedetect reports the duration only when the picture moves again; a
+    freeze still running at the end of the file (a stalled stream) is closed
+    at `end_time`.
+    """
+    freezes, start = [], None
+    for m in _FREEZE_RE.finditer(stdout):
+        if m.group(1) is not None:
+            start = float(m.group(1))
+        elif start is not None:
+            freezes.append((start, float(m.group(2))))
+            start = None
+    if start is not None and end_time > start:
+        freezes.append((start, end_time - start))
+    return freezes
+
+
+def check_audio_track(path: Path, index: int) -> tuple[list[str], list[tuple[float, float]], int]:
+    """Decode one audio track and check its packet timestamps.
+
+    Returns (decode error lines, [(time, gap seconds)], timestamp warnings):
+    a positive gap is missing audio, a negative one overlapping packets.
+    """
+    proc = run_tool(["ffmpeg", "-v", "error", "-nostdin", "-i", str(path),
+                     "-map", f"0:a:{index}", "-f", "null", "-"], timeout=7200)
+    lines = [l.strip() for l in proc.stderr.splitlines() if l.strip()]
+    timestamp_lines = sum(1 for l in lines if _TIMESTAMP_RE.search(l))
+    errors = [l for l in lines if not _TIMESTAMP_RE.search(l)]
+    if proc.returncode != 0 and not errors:
+        errors = ["ffmpeg could not decode this audio track"]
+    probe = run_tool(["ffprobe", "-v", "error", "-select_streams", f"a:{index}",
+                      "-show_entries", "packet=pts_time,duration_time", "-of", "csv=p=0",
+                      str(path)], timeout=600)
+    packets = []
+    for line in probe.stdout.splitlines():
+        parts = line.strip().split(",")
+        try:
+            pts = float(parts[0])
+        except (ValueError, IndexError):
+            continue
+        try:
+            dur = float(parts[1])
+        except (ValueError, IndexError):
+            dur = None                      # "N/A": filled in below
+        packets.append((pts, dur))
+    packets.sort(key=lambda p: p[0])
+    if any(d is None for _, d in packets) and len(packets) > 2:
+        # no packet durations: the typical spacing stands in for them
+        spacing = statistics.median(b[0] - a[0] for a, b in zip(packets, packets[1:]))
+        packets = [(t, d if d is not None else max(0.0, spacing)) for t, d in packets]
+    gaps = []
+    for (t0, d0), (t1, _) in zip(packets, packets[1:]):
+        gap = t1 - (t0 + (d0 or 0.0))
+        if abs(gap) > max(AUDIO_GAP_SEC, d0 or 0.0):
+            gaps.append((t0 + (d0 or 0.0), gap))
+    return errors, gaps, timestamp_lines
+
+
+def check_full(path: Path, expected_duration: float = 0.0,
+               audio_tracks: int | None = None) -> IntegrityResult:
     """Full check: decode the entire video and every audio track.
 
     Errors are attributed to a stream and carry the playback position at
-    which ffmpeg reported them (from -progress, so approximate).  If the
-    decode cannot finish (timeout) the file stays unverified.
+    which ffmpeg reported them (from -progress, so approximate).  Frozen
+    video is reported as a warning.  With `audio_tracks` set, each audio
+    track is decoded on its own so errors and timestamp discontinuities can
+    be pinned to a track.  If the decode cannot finish (timeout) the file
+    stays unverified.
     """
     result = IntegrityResult(checked=True)
     path = Path(path)
 
     cmd = ["ffmpeg", "-v", "error", "-nostdin", "-progress", "pipe:2",
-           "-stats_period", "1", "-i", str(path),
-           "-map", "0:v?", "-map", "0:a?", "-f", "null", "-"]
+           "-stats_period", "1", "-i", str(path), "-map", "0:v:0?"]
+    if audio_tracks is None:
+        cmd += ["-map", "0:a?"]
+    cmd += ["-vf", f"freezedetect=n=0.001:d={MIN_FREEZE_SEC:g},metadata=print:file=-",
+            "-f", "null", "-"]
     try:
         proc = run_tool(cmd, timeout=7200)  # up to 2 hours
     except subprocess.TimeoutExpired:
@@ -165,6 +243,35 @@ def check_full(path: Path, expected_duration: float = 0.0) -> IntegrityResult:
         result.errors.append(
             f"decoded only {position:.0f}s of {expected_duration:.0f}s — premature end of file")
         result.error_count += 1
+
+    result.freezes = parse_freezes(proc.stdout, expected_duration or position)
+    for start, duration in result.freezes:
+        result.warnings.append(
+            f"video frozen for {duration:.0f}s at {start:.0f}s "
+            "(a static scene, or a stalled stream if errors are reported nearby)")
+
+    if audio_tracks:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(4, audio_tracks)) as pool:
+            futures = [pool.submit(check_audio_track, path, i) for i in range(audio_tracks)]
+        for i, fut in enumerate(futures):
+            try:
+                errors, gaps, ts_lines = fut.result()
+            except subprocess.TimeoutExpired:
+                result.warnings.append(f"audio track #{i + 1} could not be fully checked (timeout)")
+                continue
+            result.timestamp_issues += ts_lines
+            for line in errors:
+                _add_issue(result, line, f"audio #{i + 1}", stream="audio")
+            if errors:
+                result.track_errors[i] = len(errors)
+            if gaps:
+                result.track_gaps[i] = gaps[:MAX_STORED_GAPS]
+                first = gaps[0]
+                result.warnings.append(
+                    f"audio track #{i + 1}: {len(gaps)} timestamp discontinuit"
+                    f"{'y' if len(gaps) == 1 else 'ies'}, first at {first[0]:.0f}s "
+                    f"({'missing' if first[1] > 0 else 'overlapping'} {abs(first[1]):.2f}s)")
 
     result.full_checked = True
     _note_timestamps(result)

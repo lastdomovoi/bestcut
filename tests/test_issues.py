@@ -346,6 +346,30 @@ class Stereo3DTests(unittest.TestCase):  # issue #15
             detect_3d(vf.path, vf)
         self.assertFalse(vf.video.is_3d)
 
+    def test_mvc_dependent_view_profile(self):
+        for profile in ("Stereo High", "Multiview High"):
+            vf = VideoFile(path=Path("Movie.mkv"))
+            vf.video.codec = "h264"
+            vf.video.profile = "High"
+            vf.video.stream_profiles = ["High", profile]
+            from unittest import mock
+            from procutil import ToolResult
+            with mock.patch("probe.run_tool", return_value=ToolResult(0, "{}", "")):
+                detect_3d(vf.path, vf)
+            self.assertTrue(vf.video.is_3d)
+            self.assertEqual(vf.video.stereo_mode, "mvc")
+            self.assertTrue(vf.video.stereo_full_res)   # full resolution per eye
+
+    def test_plain_high_profile_is_not_mvc(self):
+        from unittest import mock
+        from procutil import ToolResult
+        vf = VideoFile(path=Path("Movie.mkv"))
+        vf.video.codec, vf.video.profile = "h264", "High"
+        vf.video.stream_profiles = ["High"]
+        with mock.patch("probe.run_tool", return_value=ToolResult(0, "{}", "")):
+            detect_3d(vf.path, vf)
+        self.assertFalse(vf.video.is_3d)
+
     def test_filename_false_positive(self):
         v = self.make("Four.Brothers.2005.mkv")
         self.assertFalse(v.is_3d)
@@ -693,9 +717,6 @@ class BlackBarTests(unittest.TestCase):
                                delta=bits_per_pixel(b) * 0.1)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 # ---------------------------------------------------------------- issue #2 (rest)
 from languages import (OverrideStoreError, apply_overrides,  # noqa: E402
@@ -834,3 +855,133 @@ class LanguageEvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             apply_overrides(vf, Path(d) / "none.json")
         self.assertEqual(vf.audio_tracks[0].language_override, "")
+
+
+# ---------------------------------------------------------------- issues #12/#13 (rest)
+from integrity import check_audio_track, parse_freezes  # noqa: E402
+
+
+class FreezeParseTests(unittest.TestCase):
+    def test_parse(self):
+        text = ("frame:10 pts:400 pts_time:10\n"
+                "lavfi.freezedetect.freeze_start=10.04\n"
+                "frame:300 pts:12000 pts_time:300\n"
+                "lavfi.freezedetect.freeze_duration=8.2\n"
+                "lavfi.freezedetect.freeze_end=18.24\n"
+                "lavfi.freezedetect.freeze_start=40\n"
+                "lavfi.freezedetect.freeze_duration=4\n")
+        self.assertEqual(parse_freezes(text), [(10.04, 8.2), (40.0, 4.0)])
+        self.assertEqual(parse_freezes(""), [])
+        # a freeze that runs to the end of the file never gets a duration line
+        self.assertEqual(parse_freezes("lavfi.freezedetect.freeze_start=100", 160.0), [(100.0, 60.0)])
+        self.assertEqual(parse_freezes("lavfi.freezedetect.freeze_start=100"), [])
+        self.assertEqual(parse_freezes("lavfi.freezedetect.freeze_duration=3"), [])
+
+
+@unittest.skipUnless(HAVE_FFMPEG, "ffmpeg required")
+class TrackIntegrityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp())
+        t = cls.tmp
+        _mk(["-f", "lavfi", "-i", "sine=f=440:d=20:r=48000", "-af",
+             "asetpts='PTS+if(gt(PTS*TB,8),3/TB,0)'", "-c:a", "aac", "-f", "matroska",
+             str(t / "gap.mka")])
+        _mk(["-f", "lavfi", "-i", "sine=f=440:d=20:r=48000", "-c:a", "aac", str(t / "ok.mka")])
+        _mk(["-f", "lavfi", "-i", "sine=f=330:d=20", "-c:a", "mp3", str(t / "a.mp3")])
+        data = bytearray((t / "a.mp3").read_bytes())
+        rnd = random.Random(4)
+        for i in range(len(data) // 2, len(data) // 2 + 300):
+            data[i] = rnd.randrange(256)
+        (t / "a_bad.mp3").write_bytes(bytes(data))
+        # two audio tracks (aac + mp3): the mp3 one corrupted afterwards is hard to
+        # target inside an interleaved file, so tracks are damaged by construction
+        _mk(["-f", "lavfi", "-i", "testsrc2=s=320x180:d=20:r=25", "-f", "lavfi", "-i",
+             "sine=f=440:d=20", "-f", "lavfi", "-i", "sine=f=550:d=20", "-map", "0", "-map", "1",
+             "-map", "2", "-c:v", "libx264", "-c:a:0", "aac", "-c:a:1", "aac",
+             str(t / "two.mkv")])
+        _mk(["-f", "lavfi", "-i", "testsrc2=s=320x180:d=20:r=25", "-filter_complex",
+             "[0:v]split=3[a][b][c];[a]trim=0:10,setpts=PTS-STARTPTS[a1];"
+             "[b]trim=start_frame=250:end_frame=251,loop=loop=199:size=1:start=0,"
+             "setpts=N/25/TB[b1];[c]trim=start=10,setpts=PTS-STARTPTS[c1];"
+             "[a1][b1][c1]concat=n=3:v=1:a=0", "-c:v", "libx264", str(t / "frozen.mkv")])
+        _mk(["-f", "lavfi", "-i", "testsrc2=s=320x180:d=20:r=25", "-c:v", "libx264",
+             str(t / "moving.mkv")])
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_audio_gap_is_a_timestamp_discontinuity(self):
+        errors, gaps, ts = check_audio_track(self.tmp / "gap.mka", 0)
+        self.assertEqual((errors, ts), ([], 0))
+        self.assertEqual(len(gaps), 1)
+        self.assertAlmostEqual(gaps[0][0], 8.0, delta=0.1)
+        self.assertAlmostEqual(gaps[0][1], 3.0, delta=0.1)
+
+    def test_continuous_audio_has_no_gaps(self):
+        self.assertEqual(check_audio_track(self.tmp / "ok.mka", 0), ([], [], 0))
+
+    def test_corrupt_audio_decode_errors(self):
+        errors, _, _ = check_audio_track(self.tmp / "a_bad.mp3", 0)
+        self.assertTrue(errors)
+        self.assertEqual(check_audio_track(self.tmp / "a.mp3", 0)[0], [])
+
+    def test_full_check_reports_per_track(self):
+        r = check_full(self.tmp / "gap.mka", 20, audio_tracks=1)
+        self.assertTrue(r.full_checked)
+        self.assertEqual(list(r.track_gaps), [0])
+        self.assertFalse(r.damaged)                       # a gap is a warning, not corruption
+        self.assertTrue(any("discontinuit" in w for w in r.warnings))
+        bad = check_full(self.tmp / "a_bad.mp3", 20, audio_tracks=1)
+        self.assertTrue(bad.damaged)
+        self.assertEqual(set(bad.track_errors), {0})
+        self.assertEqual(bad.streams_affected(), ["audio"])
+
+    def test_clean_multitrack_file(self):
+        r = check_full(self.tmp / "two.mkv", 20, audio_tracks=2)
+        self.assertTrue(r.verified_clean, r.errors[:3])
+        self.assertEqual((r.track_errors, r.track_gaps), ({}, {}))
+
+    def test_frozen_video_is_reported_as_a_warning(self):
+        r = check_full(self.tmp / "frozen.mkv", 20, audio_tracks=0)
+        self.assertTrue(r.freezes, r.warnings)
+        self.assertAlmostEqual(r.freezes[0][0], 10.0, delta=0.5)
+        self.assertGreater(r.freezes[0][1], 4.0)
+        self.assertTrue(r.verified_clean)                 # static, not corrupt
+        self.assertTrue(any("frozen" in w for w in r.warnings))
+
+    def test_packet_gaps_work_without_packet_durations(self):
+        from unittest import mock
+        from procutil import ToolResult
+        lines = "\n".join(f"{i * 0.021:.3f},N/A" for i in range(100))
+        lines += "\n" + "\n".join(f"{2.5 + i * 0.021:.3f},N/A" for i in range(100))
+        ok = ToolResult(0, "", "")
+        with mock.patch("integrity.run_tool", side_effect=[ok, ToolResult(0, lines, "")]):
+            errors, gaps, _ = check_audio_track(Path("x.ts"), 0)
+        self.assertEqual(len(gaps), 1)
+        self.assertAlmostEqual(gaps[0][1], 2.5 - 99 * 0.021 - 0.021, delta=0.05)
+
+    def test_audio_timestamp_warnings_are_counted(self):
+        from unittest import mock
+        from procutil import ToolResult
+        err = "[null @ 0x1] Application provided invalid, non monotonically increasing dts to muxer"
+        with mock.patch("integrity.run_tool",
+                        side_effect=[ToolResult(0, "", err + "\n" + err), ToolResult(0, "0.0,0.02\n0.02,0.02", "")]):
+            errors, gaps, ts = check_audio_track(Path("x.mka"), 0)
+        self.assertEqual((errors, ts), ([], 2))
+
+    def test_failed_audio_decode_is_an_error(self):
+        from unittest import mock
+        from procutil import ToolResult
+        with mock.patch("integrity.run_tool",
+                        side_effect=[ToolResult(1, "", ""), ToolResult(0, "", "")]):
+            errors, _, _ = check_audio_track(Path("x.mka"), 0)
+        self.assertTrue(errors)
+
+    def test_moving_video_has_no_freezes(self):
+        self.assertEqual(check_full(self.tmp / "moving.mkv", 20, audio_tracks=0).freezes, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

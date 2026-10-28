@@ -6,6 +6,7 @@ import math
 
 from languages import (is_unknown_language, language_matches, normalize_language,
                        primary_language_status, track_language)
+from audio_clicks import CLICK_PER_MIN as CLICKS_PER_MIN_MIN, CRACKLE_PER_MIN
 from models import VideoFile
 from profiles import ScoringWeights
 
@@ -68,7 +69,7 @@ def bits_per_pixel(vf: VideoFile) -> float:
     would otherwise inflate resolution and dilute BPP.
     """
     pixels = vf.video.active_pixels
-    fps = vf.video.fps
+    fps = vf.video.quality_fps
     if pixels == 0 or fps == 0:
         return 0.0
     eff_br = effective_bitrate(vf)
@@ -172,11 +173,18 @@ def select_best_audio(vf: VideoFile, primary_language: str = ""):
 
 
 # Quietest window above this level is audible hiss; clipping share above
-# CLIP_RATIO_MIN is distortion; lossless content below BAND_LIMIT_HF_DB
-# (relative to overall RMS) above 16 kHz was probably transcoded from lossy.
+# CLIP_RATIO_MIN is distortion; lossless audio with no content above
+# BAND_LIMIT_HZ was probably transcoded from lossy.
 NOISE_FLOOR_MAX_DB = -50.0
-BAND_LIMIT_HF_DB = -70.0
+BAND_LIMIT_HZ = 16000      # lossless that stops here was probably lossy once
 CLIP_RATIO_MIN = 1e-4
+
+
+def band_limited(a) -> bool:
+    """Lossless audio whose content stops at or below BAND_LIMIT_HZ although
+    the sample rate allows more (a natural 17-19 kHz rolloff reads as 18000)."""
+    return bool(a.is_lossless and a.bandwidth_hz is not None
+                and a.sample_rate >= 44100 and a.bandwidth_hz <= BAND_LIMIT_HZ)
 
 
 def audio_quality_flags(a) -> list[str]:
@@ -186,14 +194,16 @@ def audio_quality_flags(a) -> list[str]:
         flags.append(f"noisy {a.noise_floor_db:.0f} dB")
     if a.clip_ratio is not None and a.clip_ratio > CLIP_RATIO_MIN:
         flags.append(f"clipping {a.clip_ratio * 100:.2f}%")
-    if (a.hf_level_db is not None and a.is_lossless
-            and a.hf_level_db < BAND_LIMIT_HF_DB):
-        flags.append("band-limited <16kHz")
+    if band_limited(a):
+        flags.append(f"band-limited ~{a.bandwidth_hz // 1000}kHz")
+    if a.clicks_per_min is not None and a.clicks_per_min >= CLICKS_PER_MIN_MIN:
+        kind = "crackle" if a.clicks_per_min >= CRACKLE_PER_MIN else "clicks"
+        flags.append(f"{kind} {a.clicks_per_min:.0f}/min")
     return flags
 
 
 def score_audio_quality(a) -> float:
-    """Penalty (<= 0, down to -5) for noisy, clipped or band-limited audio.
+    """Penalty (<= 0, down to -7) for noisy, clipped, band-limited or clicking audio.
 
     Tracks that were not analyzed are not penalized.
     """
@@ -202,9 +212,10 @@ def score_audio_quality(a) -> float:
         penalty += min(2.0, (a.noise_floor_db - NOISE_FLOOR_MAX_DB) / 15.0 * 2.0)
     if a.clip_ratio is not None and a.clip_ratio > CLIP_RATIO_MIN:
         penalty += min(2.0, 1.0 + math.log10(a.clip_ratio / CLIP_RATIO_MIN) * 0.5)
-    if (a.hf_level_db is not None and a.is_lossless
-            and a.hf_level_db < BAND_LIMIT_HF_DB):
+    if band_limited(a):
         penalty += 1.0
+    if a.clicks_per_min is not None and a.clicks_per_min >= CLICKS_PER_MIN_MIN:
+        penalty += min(2.0, 0.5 + (a.clicks_per_min - CLICKS_PER_MIN_MIN) / 30.0 * 1.5)
     return -penalty
 
 
