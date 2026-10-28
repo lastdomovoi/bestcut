@@ -16,7 +16,7 @@ from pathlib import Path
 from models import AudioTrack, IntegrityResult, SubtitleTrack, VideoFile, VideoTrack
 
 # Bump when probe output changes so stale entries are not reused.
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "bestcut"
 
@@ -100,7 +100,7 @@ def clear_cache() -> int:
     """Clear entire cache. Returns number of deleted files."""
     count = 0
     if CACHE_DIR.exists():
-        for f in CACHE_DIR.glob("*.json"):
+        for f in [*CACHE_DIR.glob("*.json"), *CACHE_DIR.glob("thumbs*.bin")]:
             try:
                 f.unlink()
                 count += 1

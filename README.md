@@ -16,6 +16,7 @@ CLI tool for comparing video files by quality, size and device compatibility. He
 - **Dolby Atmos / DTS:X detection** — spatial audio formats are prioritized in scoring
 - **Lossless audio detection** — TrueHD, DTS-HD MA, FLAC, PCM
 - **Primary language scoring** — configurable primary language (e.g. `rus`) with penalty for absence, bonus for multiple tracks
+- **Content comparison** (`--content`, and always before `--recommend-delete`) — decodes both files once into per-second thumbnails (cached), aligns the timelines and classifies the pair: byte-identical, payload-identical (remux), decoded-equivalent, same-cut re-encode, different cut or different content. Reports inserted/removed segments, replaced blocks, short glitches, persistent overlays (logo/ad bug), colour/contrast grade differences and colour-metadata gaps, SSIM/PSNR at checkpoints, and whether a larger re-encode adds visible detail or is redundant. Slow by design
 - **Integrity checking** — detects truncated files, encoding errors, audio/video desync
 - **Device compatibility** — checks against 8 device profiles (Plex, Apple TV, Samsung/LG TV, browsers, Kodi on Android TV, etc.)
 - **Series episode matching** — auto-groups files by series title with fuzzy matching across different release names

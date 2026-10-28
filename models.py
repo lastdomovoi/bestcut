@@ -21,6 +21,8 @@ class VideoTrack:
     color_space: str = ""
     color_transfer: str = ""
     color_primaries: str = ""
+    color_range: str = ""       # "tv" / "pc" / "" if untagged
+    nb_frames: int = 0           # container frame count (0 = unknown)
     hdr_type: str = ""  # "", "hdr10", "hdr10+", "dolby_vision", "hlg"
     encoder: str = ""   # e.g. "x264", "x265", "rav1e", "libvpx"
     is_3d: bool = False
@@ -321,6 +323,8 @@ class VideoFile:
     compatibility_issues: list[str] = field(default_factory=list)
     source_type: str = ""  # "BDRip", "WEB-DL", "HDTV", "DVDRip", etc.
     metadata_warnings: list[str] = field(default_factory=list)
+    content_note: str = ""        # result of synchronized comparison (not cached)
+    content_penalty: float = 0.0  # points removed for an established overlay/ad
     # Master-grade indicators measured from the content (never names/tags)
     remaster_evidence: list[str] = field(default_factory=list)
     # For episode matching

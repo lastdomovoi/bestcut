@@ -17,6 +17,7 @@ from pathlib import Path
 
 from comparator import (
     compare_pair,
+    format_sequence_report,
     export_json,
     format_comparison,
     format_file_info,
@@ -31,6 +32,7 @@ from probe import (detect_3d, detect_all_real_channels, detect_audio_quality,
                     detect_crop_and_upscale, detect_remaster, detect_source_type,
                     measure_picture, probe_file)
 from profiles import ScoringWeights, get_profile, list_profiles, parse_custom_weights
+from sequence import SAFE_RELATIONS
 from scoring import calculate_score, rank_key, ranked_files, select_best_audio
 
 
@@ -204,6 +206,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
     # Grouping and comparison
     groups = group_episodes(video_files)
+    content_comparer = make_comparer(log, use_cache=not args.no_cache)
 
     print(f"\n{'=' * 70}")
     print(f" COMPARISON RESULTS")
@@ -231,6 +234,10 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
             # Groups or verbose — full comparison
             print(format_group_comparison(title, ep_key, files, verbose=args.verbose, weights=weights, cfg=cfg))
+            if args.content and len(files) > 1:
+                ranked = ranked_files(files)
+                for other in ranked[1:]:
+                    print(format_sequence_report(content_comparer(ranked[0], other)))
 
     # Overall summary for series
     has_comparisons = any(
@@ -277,7 +284,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
     # Deletion recommendations
     if args.recommend_delete:
-        _print_delete_recommendations(groups, cfg.primary_language)
+        _print_delete_recommendations(groups, cfg.primary_language, content_comparer)
 
     return 0
 
@@ -307,12 +314,127 @@ def _group_review_reason(ep_key, files: list[VideoFile],
     return ""
 
 
-def deletion_candidates(groups: dict, primary_language: str = ""):
+def make_comparer(log=None, use_cache: bool = True):
+    """Memoized synchronized comparison (sequence.compare_files).
+
+    Failures become an "unknown" comparison that needs review.
+    """
+    from sequence import SequenceComparison, compare_files
+    memo: dict = {}
+
+    def compare(a: VideoFile, b: VideoFile):
+        key = (str(a.path), str(b.path))
+        if key not in memo:
+            if log is not None:
+                log.write(f"  comparing content: {a.path.name} vs {b.path.name}...\n")
+                log.flush()
+            try:
+                memo[key] = compare_files(a, b, use_cache=use_cache)
+            except Exception as e:  # never let one pair abort the run
+                comp = SequenceComparison(a.path, b.path)
+                comp.review_reasons = [f"content comparison failed: {e}"]
+                memo[key] = comp
+        return memo[key]
+
+    return compare
+
+
+# Points removed from the file that carries an established overlay / ad
+OVERLAY_PENALTY = 5.0
+
+
+def _apply_overlay_penalty(comp, files: list[VideoFile]) -> None:
+    owner = next((f for f in files if f.path == comp.overlay_owner), None)
+    if owner is not None and owner.content_penalty == 0:
+        owner.content_penalty = OVERLAY_PENALTY
+        owner.score = max(0.0, owner.score - OVERLAY_PENALTY)
+
+
+def _describe(comp) -> str:
+    bits = [comp.relation.replace("_", " ")]
+    if comp.ssim_mean is not None:
+        bits.append(f"SSIM {comp.ssim_mean:.3f}")
+    if comp.redundancy.verdict:
+        bits.append(comp.redundancy.verdict.replace("_", " "))
+    return ", ".join(bits)
+
+
+def _verify_group(keeper: VideoFile, candidates: list[VideoFile], comparer,
+                  to_delete_notes: list) -> tuple[VideoFile, list[VideoFile]]:
+    """Prove with the pictures that candidates hold the keeper's video.
+
+    Returns (keeper, deletable).  Everything unproven is appended to
+    `to_delete_notes` as a review entry.  Overlay penalties are applied
+    first so the carrier of a logo/ad bug cannot be picked as keeper, and
+    a transparent larger re-encode gives way to the compact copy.
+    """
+    everyone = [keeper, *candidates]
+    comps = {}
+    pair_list = ([(a, b) for i, a in enumerate(everyone) for b in everyone[i + 1:]]
+                 if len(everyone) <= 4 else [(keeper, c) for c in candidates])
+    for a, b in pair_list:
+        comp = comparer(a, b)
+        comps[frozenset((a.path, b.path))] = comp
+        _apply_overlay_penalty(comp, [a, b])
+
+    def comp_of(x, y):
+        return comps.get(frozenset((x.path, y.path))) or comparer(x, y)
+
+    everyone = ranked_files(everyone)
+    keeper, candidates = everyone[0], everyone[1:]
+
+    # A transparent larger re-encode adds nothing: keep the compact copy
+    # (only if nothing the keeper has would be lost).
+    for _ in range(len(candidates)):
+        swap = None
+        for f in candidates:
+            comp = comp_of(keeper, f)
+            if (comp.safe_to_dedupe
+                    and comp.redundancy.verdict == "redundant_larger"
+                    and comp.redundancy.redundant_path == keeper.path
+                    and f.integrity.verified_clean
+                    and not comp.unique_in(keeper.path)):
+                swap = f
+                break
+        if swap is None:
+            break
+        candidates = [c for c in candidates if c is not swap] + [keeper]
+        keeper = swap
+
+    deletable = []
+    for f in candidates:
+        comp = comp_of(keeper, f)
+        others = [r for r in comp.review_reasons if r != comp.overlay_note]
+        if comp.overlay_owner == keeper.path:
+            to_delete_notes.append((f"{keeper.path.name} carries an overlay/ad the other "
+                                    f"lacks: {comp.overlay_note}", [keeper, f]))
+        elif comp.unique_in(f.path):
+            to_delete_notes.append(("deleting would lose: " + "; ".join(comp.unique_in(f.path)),
+                                    [keeper, f]))
+        elif (comp.overlay_owner == f.path and comp.relation in SAFE_RELATIONS
+                and not others):
+            f.content_note = _describe(comp) + f", carries an overlay ({comp.overlay_note})"
+            deletable.append(f)
+        elif comp.safe_to_dedupe:
+            f.content_note = _describe(comp)
+            deletable.append(f)
+        else:
+            to_delete_notes.append(("; ".join(comp.review_reasons) or
+                                    f"not proven to be the same video ({comp.relation})",
+                                    [keeper, f]))
+    return keeper, deletable
+
+
+def deletion_candidates(groups: dict, primary_language: str = "", comparer=None):
     """Split groups into (keep, delete, review) lists.
 
     review: [(reason, files)] for groups that need a human decision.
     A file is deleted only against a fully decoded, error-free keeper; a
     damaged file with no such replacement is never offered for deletion.
+
+    comparer(a, b) -> SequenceComparison proves the pair holds the same
+    video before anything is deleted.  Without one the caller must have
+    established that already; the CLI always passes one.
     """
     to_keep: list[VideoFile] = []
     to_delete: list[VideoFile] = []
@@ -332,14 +454,19 @@ def deletion_candidates(groups: dict, primary_language: str = ""):
                                "needed; damaged files need recovery or "
                                "re-download)", files))
                 continue
-            deletable = [f for f in ranked[1:] if f.integrity.full_checked]
-            unverified = [f for f in ranked[1:] if not f.integrity.full_checked]
+            others = ranked[1:]
+            unverified = [f for f in others if not f.integrity.full_checked]
             if unverified:
                 review.append(("copies not fully verified: " + ", ".join(
                     f.path.name for f in unverified), unverified))
-            if deletable:
+            candidates = [f for f in others if f.integrity.full_checked]
+
+            if comparer is not None:
+                keeper, candidates = _verify_group(keeper, candidates, comparer,
+                                                   to_delete_notes=review)
+            if candidates:
                 to_keep.append(keeper)
-                to_delete.extend(deletable)
+                to_delete.extend(candidates)
     return to_keep, to_delete, review
 
 
@@ -357,9 +484,10 @@ def damaged_without_replacement(groups: dict) -> list[VideoFile]:
 def _print_delete_recommendations(
     groups: dict,
     primary_language: str = "",
+    comparer=None,
 ) -> None:
     """Print deletion recommendations for worst duplicates."""
-    to_keep, to_delete, review = deletion_candidates(groups, primary_language)
+    to_keep, to_delete, review = deletion_candidates(groups, primary_language, comparer)
 
     broken = damaged_without_replacement(groups)
     if broken:
@@ -401,6 +529,8 @@ def _print_delete_recommendations(
         print(f"  DEL  {vf.path}")
         print(f"       {vf.file_size_human} | {vf.video.resolution_label} "
               f"{vf.video.codec.upper()} | {vf.score:.1f} points")
+        if vf.content_note:
+            print(f"       verified: {vf.content_note}")
 
     print(f"\n  Keep ({len(to_keep)} files):")
     for vf in to_keep[:5]:
@@ -542,6 +672,11 @@ def main():
     parser.add_argument(
         "--recommend-delete", "-D", action="store_true",
         help="Show deletion recommendations for worst duplicates",
+    )
+    parser.add_argument(
+        "--content", action="store_true",
+        help="Compare the actual video of duplicate groups (aligned frames, "
+             "SSIM, colour, inserted/replaced segments); slow",
     )
     parser.add_argument(
         "--no-cache", action="store_true",

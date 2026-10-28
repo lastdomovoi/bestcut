@@ -803,3 +803,38 @@ def export_json(files: list[VideoFile], cfg=None) -> str:
         result.append(entry)
 
     return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+def format_sequence_report(comp) -> str:
+    """Human-readable report of a synchronized content comparison."""
+    lines = [f"\n  Content comparison: {comp.path_a.name}  vs  {comp.path_b.name}",
+             f"    relation: {comp.relation.replace('_', ' ')} "
+             f"(confidence {comp.confidence})"]
+    for e in comp.evidence:
+        lines.append(f"    - {e}")
+    if comp.identical_streams:
+        lines.append(f"    identical streams: {', '.join(comp.identical_streams)}")
+    if comp.changed_streams:
+        lines.append(f"    changed streams: {', '.join(comp.changed_streams)}")
+    if comp.frame_counts_equal is not None:
+        lines.append(f"    frame counts {'equal' if comp.frame_counts_equal else 'differ'}")
+    for d in comp.divergences:
+        lines.append(f"    ! {d.kind.replace('_', ' ')} at {d.a_start:.0f}s"
+                     + (f"–{d.a_end:.0f}s" if d.a_end > d.a_start else "") + f": {d.note}")
+    c = comp.color
+    if c.stable or c.metadata_issues:
+        lines.append(f"    colour: {c.describe()}" + ("  [material]" if c.material else ""))
+        for m in c.metadata_issues:
+            lines.append(f"    colour metadata: {m}")
+    r = comp.redundancy
+    if r.verdict:
+        lines.append(f"    redundancy: {r.verdict.replace('_', ' ')}"
+                     f" (size x{r.size_ratio:.2f}"
+                     + (f", detail x{r.detail_ratio:.2f}" if r.detail_ratio else "") + ")")
+        for n in r.notes:
+            lines.append(f"      {n}")
+    if comp.review_required:
+        lines.append(f"    {_RED}review required{_RESET}: " + "; ".join(comp.review_reasons or ["unverified"]))
+    else:
+        lines.append(f"    {_GREEN}safe to treat as the same video{_RESET}")
+    return "\n".join(lines)
